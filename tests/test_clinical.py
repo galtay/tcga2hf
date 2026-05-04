@@ -36,6 +36,7 @@ def test_to_patient_rows_one_row_per_case(one_case: list[dict]) -> None:
     assert row["case_id"] == one_case[0]["case_id"]
     assert row["case_submitter_id"].startswith("TCGA-")
     assert row["project_id"] == "TCGA-CHOL"
+    assert row["gdc_portal_url"] == f"https://portal.gdc.cancer.gov/cases/{row['case_id']}"
 
 
 def test_demographic_is_a_struct_with_expected_keys(one_case: list[dict]) -> None:
@@ -158,6 +159,31 @@ def test_write_patients_parquet_round_trip(one_case: list[dict], tmp_path: Path)
     assert isinstance(record["diagnoses"], list)
     if record["diagnoses"]:
         assert isinstance(record["diagnoses"][0]["treatments"], list)
+
+
+def test_write_patients_uses_row_groups_and_page_index(
+    one_case: list[dict], tmp_path: Path
+) -> None:
+    """The HF Dataset Viewer needs bounded row groups + a page index to scan
+    large parquets without hitting the 300 MB limit. Confirm both are written."""
+    # Multiply our one fixture row to span more than one row group.
+    n = clinical._ROW_GROUP_SIZE + 5
+    rows = clinical.to_patient_rows(one_case * n)
+    out = clinical.write_patients(rows, tmp_path, project_id="TCGA-CHOL")
+
+    pf = pq.ParquetFile(out)
+    assert pf.metadata.num_rows == n
+    # n rows split into row groups of _ROW_GROUP_SIZE → ceil(n / size) groups.
+    assert pf.metadata.num_row_groups == 2
+    assert pf.metadata.row_group(0).num_rows == clinical._ROW_GROUP_SIZE
+    assert pf.metadata.row_group(1).num_rows == 5
+
+    # Page index presence: with `write_page_index=True`, every column should
+    # carry both a column index (per-page min/max) and an offset index
+    # (per-page byte offsets) the Viewer can use for random access.
+    rg0 = pf.metadata.row_group(0)
+    assert all(rg0.column(i).has_column_index for i in range(rg0.num_columns))
+    assert all(rg0.column(i).has_offset_index for i in range(rg0.num_columns))
 
 
 def test_diagnoses_sorted_by_days_then_id() -> None:

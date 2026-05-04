@@ -136,10 +136,14 @@ def _patient_row(case: dict[str, Any]) -> dict[str, Any]:
         _pick(fh, FAMILY_HISTORY_FIELDS) for fh in (case.get("family_histories") or [])
     ]
     samples = [_sample_dict(s) for s in (case.get("samples") or [])]
+    case_id = case.get("case_id")
     return {
-        "case_id": case.get("case_id"),
+        "case_id": case_id,
         "case_submitter_id": case.get("submitter_id"),
         "project_id": project.get("project_id"),
+        "gdc_portal_url": (
+            f"https://portal.gdc.cancer.gov/cases/{case_id}" if case_id else None
+        ),
         "primary_site": case.get("primary_site"),
         "disease_type": case.get("disease_type"),
         "index_date": case.get("index_date"),
@@ -163,14 +167,31 @@ def to_patient_rows(cases: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_patient_row(case) for case in cases]
 
 
+# Row group size targeting the HuggingFace Dataset Viewer's 300 MB scan limit
+# (see https://huggingface.co/docs/hub/datasets-data-files-configuration). Each
+# patient row is ~1-1.5 MB compressed, dominated by the 60k-gene expression
+# arrays, so 50 rows per group ≈ 50-75 MB — comfortably below the limit and
+# small enough that the Viewer's per-page random access is snappy.
+_ROW_GROUP_SIZE = 50
+
+
 def write_patients(rows: list[dict[str, Any]], processed_dir: Path, project_id: str) -> Path:
     """Write a single project's patient rows to <project_id>/train.parquet.
 
     The per-project directory layout matches the HuggingFace `configs:` convention
     so each TCGA project surfaces as its own loadable subset.
+
+    Row groups are sized for the HF Dataset Viewer (see `_ROW_GROUP_SIZE`) and
+    a page index is written so the Viewer can read only the bytes it needs to
+    render a page of rows rather than scanning the whole row group.
     """
     out_path = processed_dir / project_id / "train.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(rows, schema=PATIENTS)
-    pq.write_table(table, out_path)
+    pq.write_table(
+        table,
+        out_path,
+        row_group_size=_ROW_GROUP_SIZE,
+        write_page_index=True,
+    )
     return out_path

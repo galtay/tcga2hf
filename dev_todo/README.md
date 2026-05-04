@@ -6,7 +6,5 @@ when there's room.
 
 ## Contents
 
-- [`optimize_downloads.md`](optimize_downloads.md) — sequential per-file
-  HTTP fetches in `genomic.fetch_files` are the dominant cost when scaling
-  beyond a couple of TCGA projects. Parallelize, or adopt the existing
-  `gdc-client` bulk-download tool if it covers our needs.
+(no open items — `optimize_downloads.md` resolved by switching
+`genomic.fetch_files` to GDC's bulk POST `/data` path.)

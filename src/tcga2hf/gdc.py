@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tarfile
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -29,6 +32,18 @@ def and_(*clauses: dict[str, Any]) -> dict[str, Any]:
 
 
 _RETRYABLE = (httpx.TransportError, httpx.HTTPStatusError)
+
+# For bulk POST /data: GDC occasionally returns a truncated tar.gz at scale
+# (connection drop mid-stream after a 200 OK). httpx surfaces that as
+# RemoteProtocolError; gzip/tarfile catch it later as EOFError or ReadError
+# during decompression. All three are transient, so retry the whole batch.
+_BULK_RETRYABLE = (
+    httpx.TransportError,
+    httpx.HTTPStatusError,
+    httpx.HTTPError,
+    EOFError,
+    tarfile.ReadError,
+)
 
 
 class GDCClient:
@@ -150,6 +165,77 @@ class GDCClient:
             with out_path.open("wb") as fh:
                 for chunk in resp.iter_bytes():
                     fh.write(chunk)
+
+    def bulk_download(
+        self,
+        file_uuids: list[str],
+        out_dir: Path,
+        batch_size: int = 50,
+    ) -> None:
+        """Download many open-access files via batched POST /data.
+
+        GDC returns a tar.gz of `<uuid>/<file_name>` per id (plus a MANIFEST.txt)
+        when given >=2 ids; for a single id it returns the raw file. We fold any
+        tail-of-1 into the prior batch so every POST has >=2 ids and we don't
+        need two response handlers. Callers with exactly one file should use
+        `download()` directly.
+
+        Files are extracted as `out_dir/<file_name>` to match the layout of the
+        per-file `download()` path so callers can treat the two interchangeably.
+        """
+        if not file_uuids:
+            return
+        if len(file_uuids) < 2:
+            raise ValueError("bulk_download needs >=2 ids; use download() for a single file.")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        batches = [file_uuids[i : i + batch_size] for i in range(0, len(file_uuids), batch_size)]
+        # If the last batch is a single id, merge it back so every POST has >=2.
+        if len(batches) >= 2 and len(batches[-1]) == 1:
+            batches[-2].append(batches[-1].pop())
+            batches.pop()
+
+        for batch in batches:
+            self._download_batch(batch, out_dir)
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        retry=retry_if_exception_type(_BULK_RETRYABLE),
+    )
+    def _download_batch(self, batch: list[str], out_dir: Path) -> None:
+        """POST one batch to /data, stream the tar.gz response, extract files.
+
+        Extraction happens after the full tar.gz lands in a temp file so a
+        mid-stream drop surfaces as `EOFError` / `tarfile.ReadError` here
+        (rather than half-corrupting an already-extracted file). Both errors
+        are in `_BULK_RETRYABLE`, so the whole batch retries cleanly.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", dir=out_dir) as tmp:
+            with self._client.stream(
+                "POST", "/data", json={"ids": batch}, timeout=300.0
+            ) as resp:
+                resp.raise_for_status()
+                for chunk in resp.iter_bytes():
+                    tmp.write(chunk)
+            tmp.flush()
+            tmp.seek(0)
+            with tarfile.open(fileobj=tmp, mode="r:gz") as tar:
+                for member in tar.getmembers():
+                    if not member.isfile():
+                        continue
+                    # Tar entries are "<uuid>/<file_name>" plus a top-level
+                    # MANIFEST.txt; we keep only the leaf name.
+                    if "/" not in member.name:
+                        continue
+                    file_name = Path(member.name).name
+                    src = tar.extractfile(member)
+                    if src is None:
+                        continue
+                    target = out_dir / file_name
+                    with src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
 
 
 def write_cases_json(cases: list[dict[str, Any]], path: Path) -> None:

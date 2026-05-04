@@ -7,6 +7,21 @@ otherwise have to write themselves: flattening the GDC biospecimen tree,
 building tumor/normal sample pairs, indexing mutations by gene, looking up
 expression by gene name, sorting events into a longitudinal patient timeline.
 
+## Source of truth
+
+The pyarrow `*_FIELDS` lists in `tcga2hf.schema` (regenerated from the
+gdcdictionary YAMLs) are the single source of truth. Every entity model below
+is generated from one of those lists via `_make_entity`, so the pydantic field
+set is — by construction — identical to the parquet schema. Convenience
+methods are added by subclassing each auto-generated base.
+
+## Strictness
+
+Every model inherits `extra="forbid"`. A row with a key not declared in the
+GDC dictionary will fail to validate rather than be silently dropped. This
+makes the model a precise contract: if a user reaches for `patient.foo` and
+`foo` doesn't exist as a typed field, the row would never have validated.
+
 This module is deliberately **slow and explicit** — it's a reference for what
 the data means, not the fastest way to operate on it. For high-throughput
 workflows, work directly off pyarrow / polars and use these models as the
@@ -28,7 +43,7 @@ Usage:
         for aliquot_id, expr in patient.expression_for_gene("ALB").items():
             print(aliquot_id, "ALB TPM:", expr["tpm_unstranded"])
         for event in patient.timeline():
-            print(event["day"], event["category"])
+            print(event.day, event.category)
 """
 
 from __future__ import annotations
@@ -38,72 +53,138 @@ from typing import Any, Literal
 import pyarrow as pa
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from tcga2hf.schema import MUTATION_FIELDS
+from tcga2hf.schema import (
+    ALIQUOT_FIELDS,
+    ANALYTE_FIELDS,
+    DEMOGRAPHIC_FIELDS,
+    DIAGNOSIS_FIELDS,
+    EXPOSURE_FIELDS,
+    EXPRESSION_FIELDS,
+    FAMILY_HISTORY_FIELDS,
+    FOLLOW_UP_FIELDS,
+    MUTATION_FIELDS,
+    PATIENT_FIELDS,
+    PORTION_FIELDS,
+    SAMPLE_FIELDS,
+    TREATMENT_FIELDS,
+)
 
 # ---------------------------------------------------------------------------
-# Biospecimen hierarchy: case → samples → portions → analytes → aliquots
+# Base config + pyarrow-to-Python type translation
 # ---------------------------------------------------------------------------
 
 
 class _BaseEntity(BaseModel):
-    """Shared config: ignore extra fields so future GDC additions don't break us."""
+    """Strict base for every TCGA entity model.
 
-    model_config = ConfigDict(extra="ignore", frozen=False)
+    `extra="forbid"` makes the GDC-dictionary field set the contract: any
+    unknown key raises a ValidationError rather than being silently dropped.
+    """
 
-
-class Aliquot(_BaseEntity):
-    aliquot_id: str
-    submitter_id: str | None = None
-    source_center: str | None = None
-    aliquot_quantity: float | None = None
-    aliquot_volume: float | None = None
-    concentration: float | None = None
+    model_config = ConfigDict(extra="forbid", frozen=False)
 
 
-class Analyte(_BaseEntity):
-    analyte_id: str
-    submitter_id: str | None = None
-    analyte_type: str | None = None
-    concentration: float | None = None
-    amount: float | None = None
-    a260_a280_ratio: float | None = None
-    well_number: str | None = None
-    spectrophotometer_method: str | None = None
-    experimental_protocol_type: str | None = None
-    normal_tumor_genotype_snp_match: str | None = None
-    aliquots: list[Aliquot] = Field(default_factory=list)
+def _pa_to_py_scalar(t: pa.DataType) -> type:
+    """Map a pyarrow scalar type to its Python primitive."""
+    if pa.types.is_integer(t):
+        return int
+    if pa.types.is_floating(t):
+        return float
+    if pa.types.is_boolean(t):
+        return bool
+    if pa.types.is_string(t):
+        return str
+    raise TypeError(f"unhandled scalar pyarrow type {t!r}")
 
 
-class Portion(_BaseEntity):
-    portion_id: str
-    submitter_id: str | None = None
-    portion_number: str | None = None
-    weight: float | None = None
-    is_ffpe: bool | None = None
-    creation_datetime: int | None = None
-    analytes: list[Analyte] = Field(default_factory=list)
+def _pa_to_py(t: pa.DataType) -> Any:
+    """Translate a pyarrow type to a pydantic-compatible annotation.
+
+    Struct / list-of-struct types must be supplied via `_make_entity` overrides
+    (we need the actual entity class, which the type alone can't name).
+    """
+    if pa.types.is_struct(t):
+        raise TypeError("struct types must be supplied via overrides")
+    if pa.types.is_list(t):
+        if pa.types.is_struct(t.value_type):
+            raise TypeError("list-of-struct types must be supplied via overrides")
+        # Parquet allows null elements inside list columns; reflect that.
+        return list[_pa_to_py_scalar(t.value_type) | None]
+    return _pa_to_py_scalar(t)
 
 
-class Sample(_BaseEntity):
-    sample_id: str
-    submitter_id: str | None = None
-    sample_type: str | None = None
-    tissue_type: str | None = None
-    specimen_type: str | None = None
-    tumor_descriptor: str | None = None
-    preservation_method: str | None = None
-    freezing_method: str | None = None
-    days_to_collection: int | None = None
-    days_to_sample_procurement: int | None = None
-    initial_weight: float | None = None
-    current_weight: float | None = None
-    longest_dimension: float | None = None
-    intermediate_dimension: float | None = None
-    shortest_dimension: float | None = None
-    pathology_report_uuid: str | None = None
-    portions: list[Portion] = Field(default_factory=list)
+def _make_entity(
+    name: str,
+    fields: list[pa.Field],
+    overrides: dict[str, tuple[Any, Any]] | None = None,
+    required: tuple[str, ...] = (),
+    base: type[BaseModel] = _BaseEntity,
+) -> type[BaseModel]:
+    """Build a pydantic model from a pyarrow `*_FIELDS` list.
 
-    # ---- convenience views over the GDC biospecimen tree ----
+    For each pyarrow field:
+      - if `overrides[name]` is set, use that (used for nested struct fields
+        whose Python type is another generated entity);
+      - if `name` is in `required`, the field is required (no default);
+      - if it's a list type, it defaults to an empty list;
+      - otherwise it's `T | None = None`.
+    """
+    field_defs: dict[str, tuple[Any, Any]] = {}
+    for f in fields:
+        if overrides and f.name in overrides:
+            field_defs[f.name] = overrides[f.name]
+            continue
+        py_type = _pa_to_py(f.type)
+        if f.name in required:
+            field_defs[f.name] = (py_type, ...)
+        else:
+            # Auto-generated fields are all `T | None = None`. Sparsely
+            # populated list-of-scalar fields (e.g.
+            # follow_up.imaging_anatomic_site) round-trip from parquet as
+            # None when absent, which is distinct from an empty list — so we
+            # treat them the same as scalar fields. List-of-struct container
+            # fields are passed via `overrides` and default to [] there,
+            # because the row builder (`clinical._patient_row`) always emits
+            # a list for them.
+            field_defs[f.name] = (py_type | None, None)
+    return create_model(name, __base__=base, **field_defs)
+
+
+# ---------------------------------------------------------------------------
+# Biospecimen hierarchy: case → samples → portions → analytes → aliquots
+# Generated bottom-up so each parent can reference the typed child class.
+# ---------------------------------------------------------------------------
+
+
+Aliquot = _make_entity("Aliquot", ALIQUOT_FIELDS, required=("aliquot_id",))
+
+Analyte = _make_entity(
+    "Analyte",
+    ANALYTE_FIELDS,
+    overrides={"aliquots": (list[Aliquot], Field(default_factory=list))},
+    required=("analyte_id",),
+)
+
+Portion = _make_entity(
+    "Portion",
+    PORTION_FIELDS,
+    overrides={"analytes": (list[Analyte], Field(default_factory=list))},
+    required=("portion_id",),
+)
+
+# Sample needs convenience methods, so we generate the field-only base then
+# attach helpers via a subclass.
+_SampleBase = _make_entity(
+    "_SampleBase",
+    SAMPLE_FIELDS,
+    overrides={"portions": (list[Portion], Field(default_factory=list))},
+    required=("sample_id",),
+)
+
+
+class Sample(_SampleBase):
+    """One biospecimen sample. Fields are the full GDC dictionary set, inherited
+    from `_SampleBase`; the methods below walk the embedded biospecimen tree."""
 
     def all_analytes(self) -> list[Analyte]:
         return [a for p in self.portions for a in p.analytes]
@@ -135,100 +216,16 @@ class Sample(_BaseEntity):
 # ---------------------------------------------------------------------------
 
 
-class Demographic(_BaseEntity):
-    """Demographic struct fields. The parquet carries the full set defined in
-    the GDC dictionary; this typed view exposes the most common ones — extra
-    fields are silently accepted via `extra="ignore"`."""
-
-    demographic_id: str | None = None
-    submitter_id: str | None = None
-    sex_at_birth: str | None = None  # GDC dictionary field; replaces deprecated `gender`
-    race: str | None = None
-    ethnicity: str | None = None
-    vital_status: str | None = None
-    age_at_index: int | None = None
-    age_is_obfuscated: bool | None = None
-    days_to_birth: int | None = None
-    days_to_death: int | None = None
-    year_of_birth: int | None = None
-    year_of_death: int | None = None
-    cause_of_death: str | None = None
-    country_of_residence_at_enrollment: str | None = None
-
-
-class Treatment(_BaseEntity):
-    treatment_id: str | None = None
-    submitter_id: str | None = None
-    treatment_type: str | None = None
-    treatment_or_therapy: str | None = None
-    treatment_intent_type: str | None = None
-    treatment_outcome: str | None = None
-    therapeutic_agents: str | None = None
-    days_to_treatment_start: float | None = None
-    days_to_treatment_end: float | None = None
-    initial_disease_status: str | None = None
-
-
-class Diagnosis(_BaseEntity):
-    diagnosis_id: str | None = None
-    submitter_id: str | None = None
-    primary_diagnosis: str | None = None
-    morphology: str | None = None
-    tissue_or_organ_of_origin: str | None = None
-    site_of_resection_or_biopsy: str | None = None
-    icd_10_code: str | None = None
-    ajcc_pathologic_stage: str | None = None
-    ajcc_pathologic_t: str | None = None
-    ajcc_pathologic_n: str | None = None
-    ajcc_pathologic_m: str | None = None
-    ajcc_staging_system_edition: str | None = None
-    age_at_diagnosis: int | None = None
-    days_to_diagnosis: float | None = None
-    year_of_diagnosis: int | None = None
-    prior_malignancy: str | None = None
-    prior_treatment: str | None = None
-    synchronous_malignancy: str | None = None
-    classification_of_tumor: str | None = None
-    last_known_disease_status: str | None = None
-    days_to_last_follow_up: float | None = None
-    days_to_last_known_disease_status: float | None = None
-    days_to_recurrence: float | None = None
-    residual_disease: str | None = None
-    diagnosis_is_primary_disease: bool | None = None
-    treatments: list[Treatment] = Field(default_factory=list)
-
-
-class FollowUp(_BaseEntity):
-    follow_up_id: str | None = None
-    submitter_id: str | None = None
-    timepoint_category: str | None = None
-    disease_response: str | None = None
-    progression_or_recurrence: str | None = None
-    days_to_follow_up: float | None = None
-    days_to_progression: float | None = None
-    days_to_recurrence: float | None = None
-    ecog_performance_status: str | None = None
-
-
-class Exposure(_BaseEntity):
-    exposure_id: str | None = None
-    submitter_id: str | None = None
-    tobacco_smoking_status: str | None = None
-    cigarettes_per_day: float | None = None
-    years_smoked: float | None = None
-    alcohol_history: str | None = None
-    alcohol_intensity: str | None = None
-    bmi: float | None = None
-    weight: float | None = None
-    height: float | None = None
-
-
-class FamilyHistory(_BaseEntity):
-    family_history_id: str | None = None
-    submitter_id: str | None = None
-    relationship_type: str | None = None
-    relative_with_cancer_history: str | None = None
-    relationship_primary_diagnosis: str | None = None
+Demographic = _make_entity("Demographic", DEMOGRAPHIC_FIELDS)
+Treatment = _make_entity("Treatment", TREATMENT_FIELDS)
+Diagnosis = _make_entity(
+    "Diagnosis",
+    DIAGNOSIS_FIELDS,
+    overrides={"treatments": (list[Treatment], Field(default_factory=list))},
+)
+FollowUp = _make_entity("FollowUp", FOLLOW_UP_FIELDS)
+Exposure = _make_entity("Exposure", EXPOSURE_FIELDS)
+FamilyHistory = _make_entity("FamilyHistory", FAMILY_HISTORY_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -236,45 +233,25 @@ class FamilyHistory(_BaseEntity):
 # ---------------------------------------------------------------------------
 
 
-def _pa_to_python(t: pa.DataType) -> type:
-    if pa.types.is_integer(t):
-        return int
-    if pa.types.is_floating(t):
-        return float
-    if pa.types.is_boolean(t):
-        return bool
-    if pa.types.is_string(t):
-        return str
-    raise TypeError(f"unhandled pyarrow type {t!r}")
+# Mutation: one row per MAF variant. 143 fields (3 FK + 140 MAF columns).
+# Field types follow the parquet schema exactly; nothing is required here
+# because the MAF spec doesn't mandate any single column.
+Mutation = _make_entity("Mutation", MUTATION_FIELDS)
 
 
-# Mutation has 143 fields; building the model from MUTATION_FIELDS keeps the
-# schema as the single source of truth and removes 140 lines of boilerplate.
-# Field types match the parquet schema exactly.
-Mutation: type[BaseModel] = create_model(
-    "Mutation",
-    __config__=ConfigDict(extra="ignore"),
-    **{f.name: (_pa_to_python(f.type) | None, None) for f in MUTATION_FIELDS},
+_GeneExpressionBase = _make_entity(
+    "_GeneExpressionBase",
+    EXPRESSION_FIELDS,
+    required=("aliquot_id", "source_file_id"),
 )
 
 
-class GeneExpression(_BaseEntity):
-    """Per-aliquot RNA-Seq STAR gene quantifications (60,660 genes per record)."""
+class GeneExpression(_GeneExpressionBase):
+    """Per-aliquot RNA-Seq STAR gene quantifications (60,660 genes per record).
 
-    sample_id: str | None = None
-    aliquot_id: str
-    source_file_id: str
-    N_unmapped: int | None = None
-    N_multimapping: int | None = None
-    N_noFeature: int | None = None
-    N_ambiguous: int | None = None
-    gene_id: list[str] = Field(default_factory=list)
-    gene_name: list[str] = Field(default_factory=list)
-    gene_type: list[str] = Field(default_factory=list)
-    unstranded: list[int | None] = Field(default_factory=list)
-    tpm_unstranded: list[float | None] = Field(default_factory=list)
-    fpkm_unstranded: list[float | None] = Field(default_factory=list)
-    fpkm_uq_unstranded: list[float | None] = Field(default_factory=list)
+    `gene_id` / `gene_name` / `gene_type` and the value arrays are index-aligned;
+    use `get_gene` to look up by symbol.
+    """
 
     def get_gene(self, gene_name: str) -> dict[str, Any] | None:
         """Return all per-gene values for `gene_name`, or None if absent.
@@ -356,32 +333,33 @@ class TimelineEvent(_BaseEntity):
     follow_up_id: str | None = None
 
 
-class TcgaHfPatient(_BaseEntity):
+_TcgaHfPatientBase = _make_entity(
+    "_TcgaHfPatientBase",
+    PATIENT_FIELDS,
+    overrides={
+        "demographic": (Demographic | None, None),
+        "diagnoses": (list[Diagnosis], Field(default_factory=list)),
+        "follow_ups": (list[FollowUp], Field(default_factory=list)),
+        "exposures": (list[Exposure], Field(default_factory=list)),
+        "family_histories": (list[FamilyHistory], Field(default_factory=list)),
+        "samples": (list[Sample], Field(default_factory=list)),
+        "samples_masked_somatic_mutation": (list[Mutation], Field(default_factory=list)),
+        "samples_gene_expression_quantification": (
+            list[GeneExpression],
+            Field(default_factory=list),
+        ),
+    },
+    required=("case_id", "case_submitter_id", "project_id"),
+)
+
+
+class TcgaHfPatient(_TcgaHfPatientBase):
     """One TCGA patient row from the `gabrielaltay/tcga-patients-open` dataset.
 
-    Mirrors the parquet schema field-for-field. Use the helper methods for
-    common joins instead of writing the nested-walk yourself.
+    Fields are the full GDC `case` set (auto-generated from PATIENT_FIELDS).
+    Methods below provide common joins so users don't have to walk the
+    nested biospecimen tree by hand.
     """
-
-    case_id: str
-    case_submitter_id: str
-    project_id: str
-    primary_site: str | None = None
-    disease_type: str | None = None
-    # Case-level timeline anchor metadata (per GDC `case` entity)
-    index_date: str | None = None  # "Diagnosis" / "Sample Procurement" / etc.
-    consent_type: str | None = None
-    days_to_consent: int | None = None
-    days_to_lost_to_followup: int | None = None
-    lost_to_followup: str | None = None
-    demographic: Demographic | None = None
-    diagnoses: list[Diagnosis] = Field(default_factory=list)
-    follow_ups: list[FollowUp] = Field(default_factory=list)
-    exposures: list[Exposure] = Field(default_factory=list)
-    family_histories: list[FamilyHistory] = Field(default_factory=list)
-    samples: list[Sample] = Field(default_factory=list)
-    samples_masked_somatic_mutation: list[Mutation] = Field(default_factory=list)
-    samples_gene_expression_quantification: list[GeneExpression] = Field(default_factory=list)
 
     # ---- biospecimen joins ----
 

@@ -5,8 +5,9 @@ GENCODE v36 gene rows × 9 columns, plus 4 N_* summary rows at the top. We:
 
   - Lift the 4 N_* QC rows out as scalar fields (using their `unstranded` value).
   - Keep all 4 unstranded value columns (raw counts + TPM + FPKM + FPKM-UQ).
-  - Drop `stranded_first` and `stranded_second` (TCGA used unstranded library
-    prep, so the stranded counts are uninformative).
+  - Drop `stranded_first` and `stranded_second`. The GDC pipeline (see
+    reference below) harmonizes by treating all reads as unstranded, so
+    `unstranded` is the canonical column for cross-sample analysis.
   - Preserve full gene metadata (gene_id with GENCODE version suffix, gene_name,
     gene_type) so the dataset is self-describing without a side vocab file.
 

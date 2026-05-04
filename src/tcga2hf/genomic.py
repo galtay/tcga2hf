@@ -64,31 +64,38 @@ def fetch_files(
     out_dir: Path,
     extra_filters: list[dict[str, Any]] | None = None,
     skip_existing: bool = True,
+    batch_size: int = 50,
 ) -> list[dict[str, Any]]:
     """Download every hit's bytes to <out_dir>/<file_name> and write manifest.json.
 
     Returns the manifest list. Existing files (matching size) are skipped unless
-    skip_existing=False.
+    skip_existing=False. Downloads are batched via POST /data (`batch_size` per
+    request) so wall time scales with total bytes rather than per-file latency.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     hits = list_open_files(client, project_id, data_type, extra_filters)
 
+    cached_ids: set[str] = set()
+    to_download_ids: list[str] = []
+    for hit in hits:
+        target = out_dir / hit["file_name"]
+        if skip_existing and target.exists() and target.stat().st_size == hit.get("file_size"):
+            cached_ids.add(hit["file_id"])
+        else:
+            to_download_ids.append(hit["file_id"])
+
+    if len(to_download_ids) >= 2:
+        client.bulk_download(to_download_ids, out_dir, batch_size=batch_size)
+    elif len(to_download_ids) == 1:
+        only = next(h for h in hits if h["file_id"] == to_download_ids[0])
+        client.download(only["file_id"], out_dir / only["file_name"])
+
     manifest: list[dict[str, Any]] = []
     for hit in hits:
-        file_id = hit["file_id"]
-        file_name = hit["file_name"]
-        target = out_dir / file_name
-
-        if skip_existing and target.exists() and target.stat().st_size == hit.get("file_size"):
-            entry_status = "cached"
-        else:
-            client.download(file_id, target)
-            entry_status = "downloaded"
-
         manifest.append(
             {
-                "file_id": file_id,
-                "file_name": file_name,
+                "file_id": hit["file_id"],
+                "file_name": hit["file_name"],
                 "file_size": hit.get("file_size"),
                 "md5sum": hit.get("md5sum"),
                 "data_type": hit.get("data_type"),
@@ -96,7 +103,7 @@ def fetch_files(
                 "experimental_strategy": hit.get("experimental_strategy"),
                 "workflow_type": hit.get("workflow_type"),
                 "cases": hit.get("cases", []),
-                "_status": entry_status,
+                "_status": "cached" if hit["file_id"] in cached_ids else "downloaded",
             }
         )
 

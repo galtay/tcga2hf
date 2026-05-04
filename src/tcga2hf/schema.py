@@ -647,7 +647,8 @@ MUTATION_FIELDS: list[pa.Field] = [
 # ---------------------------------------------------------------------------
 # Molecular: Gene Expression Quantification (RNA-Seq STAR counts)
 # Struct-of-arrays inside list-of-struct; field names match GDC TSV columns.
-# stranded_first/stranded_second dropped (TCGA used unstranded library prep).
+# stranded_first/stranded_second dropped — the GDC pipeline treats all reads
+# as unstranded for cross-sample harmonization (see expression.py docstring).
 # ---------------------------------------------------------------------------
 
 EXPRESSION_FIELDS: list[pa.Field] = [
@@ -674,34 +675,38 @@ EXPRESSION_FIELDS: list[pa.Field] = [
 # Top-level patient row
 # ---------------------------------------------------------------------------
 
-PATIENTS = pa.schema(
-    [
-        pa.field("case_id", pa.string()),
-        pa.field("case_submitter_id", pa.string()),
-        pa.field("project_id", pa.string()),
-        pa.field("primary_site", pa.string()),
-        pa.field("disease_type", pa.string()),
-        # GDC `case` entity timeline anchors. index_date names the kind of event
-        # used as the day-zero reference (TCGA: nearly always "Diagnosis").
-        # All days_to_* fields throughout this row use this anchor.
-        pa.field("index_date", pa.string()),
-        pa.field("consent_type", pa.string()),
-        pa.field("days_to_consent", pa.int64()),
-        pa.field("days_to_lost_to_followup", pa.int64()),
-        pa.field("lost_to_followup", pa.string()),
-        pa.field("demographic", pa.struct(DEMOGRAPHIC_FIELDS)),
-        pa.field("diagnoses", pa.list_(pa.struct(DIAGNOSIS_FIELDS))),
-        pa.field("follow_ups", pa.list_(pa.struct(FOLLOW_UP_FIELDS))),
-        pa.field("exposures", pa.list_(pa.struct(EXPOSURE_FIELDS))),
-        pa.field("family_histories", pa.list_(pa.struct(FAMILY_HISTORY_FIELDS))),
-        pa.field("samples", pa.list_(pa.struct(SAMPLE_FIELDS))),
-        # GDC data_type-named molecular columns. Each is a list of records keyed
-        # back to a sample/aliquot via FKs in the struct, so users can fetch
-        # only the modalities they want via top-level Parquet column projection.
-        pa.field("samples_masked_somatic_mutation", pa.list_(pa.struct(MUTATION_FIELDS))),
-        pa.field(
-            "samples_gene_expression_quantification",
-            pa.list_(pa.struct(EXPRESSION_FIELDS)),
-        ),
-    ]
-)
+PATIENT_FIELDS: list[pa.Field] = [
+    pa.field("case_id", pa.string()),
+    pa.field("case_submitter_id", pa.string()),
+    pa.field("project_id", pa.string()),
+    # Convenience link to this case's GDC Data Portal page. Templated from
+    # case_id at row-build time so the HF dataset viewer renders it as a
+    # clickable URL and pandas / polars users get it for free.
+    pa.field("gdc_portal_url", pa.string()),
+    pa.field("primary_site", pa.string()),
+    pa.field("disease_type", pa.string()),
+    # GDC `case` entity timeline anchors. index_date names the kind of event
+    # used as the day-zero reference (TCGA: nearly always "Diagnosis").
+    # All days_to_* fields throughout this row use this anchor.
+    pa.field("index_date", pa.string()),
+    pa.field("consent_type", pa.string()),
+    pa.field("days_to_consent", pa.int64()),
+    pa.field("days_to_lost_to_followup", pa.int64()),
+    pa.field("lost_to_followup", pa.string()),
+    pa.field("demographic", pa.struct(DEMOGRAPHIC_FIELDS)),
+    pa.field("diagnoses", pa.list_(pa.struct(DIAGNOSIS_FIELDS))),
+    pa.field("follow_ups", pa.list_(pa.struct(FOLLOW_UP_FIELDS))),
+    pa.field("exposures", pa.list_(pa.struct(EXPOSURE_FIELDS))),
+    pa.field("family_histories", pa.list_(pa.struct(FAMILY_HISTORY_FIELDS))),
+    pa.field("samples", pa.list_(pa.struct(SAMPLE_FIELDS))),
+    # GDC data_type-named molecular columns. Each is a list of records keyed
+    # back to a sample/aliquot via FKs in the struct, so users can fetch
+    # only the modalities they want via top-level Parquet column projection.
+    pa.field("samples_masked_somatic_mutation", pa.list_(pa.struct(MUTATION_FIELDS))),
+    pa.field(
+        "samples_gene_expression_quantification",
+        pa.list_(pa.struct(EXPRESSION_FIELDS)),
+    ),
+]
+
+PATIENTS = pa.schema(PATIENT_FIELDS)

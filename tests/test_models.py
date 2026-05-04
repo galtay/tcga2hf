@@ -12,11 +12,18 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
+from pydantic import ValidationError
 
+from tcga2hf import schema
 from tcga2hf.models import (
     Aliquot,
     Analyte,
+    Demographic,
     Diagnosis,
+    Exposure,
+    FamilyHistory,
+    FollowUp,
+    GeneExpression,
     Mutation,
     Portion,
     Sample,
@@ -92,6 +99,50 @@ def _mk_patient_with_pair() -> TcgaHfPatient:
             )
         ],
     )
+
+
+def test_strict_mode_rejects_unknown_fields() -> None:
+    """`extra="forbid"` is the contract: a row with a key not in the GDC
+    dictionary must fail to validate, not be silently dropped."""
+    with pytest.raises(ValidationError):
+        TcgaHfPatient(
+            case_id="case-1",
+            case_submitter_id="TCGA-XX-1",
+            project_id="TCGA-CHOL",
+            not_a_real_field="oops",  # type: ignore[call-arg]
+        )
+    with pytest.raises(ValidationError):
+        Sample.model_validate(
+            {"sample_id": "s-1", "made_up_attribute": "oops"},
+        )
+
+
+def test_pydantic_fields_match_pa_fields_exactly() -> None:
+    """The pydantic field sets must equal the GDC dictionary (`*_FIELDS`)
+    field sets. If gdcdictionary adds/removes a field upstream, the pyarrow
+    schema is regenerated; this test fails until pydantic catches up."""
+    pairs: list[tuple[type, list]] = [
+        (Aliquot, schema.ALIQUOT_FIELDS),
+        (Analyte, schema.ANALYTE_FIELDS),
+        (Portion, schema.PORTION_FIELDS),
+        (Sample, schema.SAMPLE_FIELDS),
+        (Demographic, schema.DEMOGRAPHIC_FIELDS),
+        (Treatment, schema.TREATMENT_FIELDS),
+        (Diagnosis, schema.DIAGNOSIS_FIELDS),
+        (FollowUp, schema.FOLLOW_UP_FIELDS),
+        (Exposure, schema.EXPOSURE_FIELDS),
+        (FamilyHistory, schema.FAMILY_HISTORY_FIELDS),
+        (Mutation, schema.MUTATION_FIELDS),
+        (GeneExpression, schema.EXPRESSION_FIELDS),
+        (TcgaHfPatient, schema.PATIENT_FIELDS),
+    ]
+    for cls, fields in pairs:
+        pyd_names = set(cls.model_fields)
+        pa_names = {f.name for f in fields}
+        assert pyd_names == pa_names, (
+            f"{cls.__name__}: pydantic - pa = {pyd_names - pa_names}; "
+            f"pa - pydantic = {pa_names - pyd_names}"
+        )
 
 
 def test_aliquot_to_sample_walks_full_tree() -> None:
