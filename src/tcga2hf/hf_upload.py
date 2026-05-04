@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from huggingface_hub import HfApi
+
+
+def upload_dataset(
+    processed_dir: Path,
+    repo_id: str,
+    private: bool = True,
+    commit_message: str | None = None,
+    token: str | None = None,
+) -> str:
+    """Push <processed_dir> to a HuggingFace dataset repo, creating it if needed.
+
+    The directory should contain README.md (with `configs:` YAML frontmatter)
+    and patients/<PROJECT>.parquet files — i.e. the exact tree produced by
+    `tcga2hf build`.
+
+    Auth: pass `token` explicitly, or set HF_TOKEN, or run `huggingface-cli login`
+    first. Returns the URL of the dataset on success.
+    """
+    if not processed_dir.exists():
+        raise FileNotFoundError(f"{processed_dir} does not exist. Run `tcga2hf build` first.")
+    if not (processed_dir / "README.md").exists():
+        raise FileNotFoundError(f"{processed_dir}/README.md missing. Re-run `tcga2hf build`.")
+
+    api = HfApi(token=token)
+    api.create_repo(
+        repo_id=repo_id,
+        repo_type="dataset",
+        private=private,
+        exist_ok=True,
+    )
+    api.upload_folder(
+        folder_path=str(processed_dir),
+        repo_id=repo_id,
+        repo_type="dataset",
+        commit_message=commit_message or "Update TCGA patients (open access) dataset",
+    )
+    return f"https://huggingface.co/datasets/{repo_id}"

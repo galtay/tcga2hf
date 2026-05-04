@@ -1,0 +1,400 @@
+{
+  "id": "1947a152-6339-4f66-b9a4-0229580f0287",
+  "primary_site": "Liver and intrahepatic bile ducts",
+  "family_histories": [
+    {
+      "relative_with_cancer_history": "yes",
+      "relationship_type": "Father",
+      "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+      "submitter_id": "TCGA-ZH-A8Y3_family_history2",
+      "state": "released",
+      "relationship_primary_diagnosis": "Head and Neck Cancer",
+      "created_datetime": "2024-12-19T14:24:26.251585-06:00",
+      "family_history_id": "347da9f0-b4f7-4dd5-9145-bc5deca2d01e"
+    },
+    {
+      "relative_with_cancer_history": "yes",
+      "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+      "submitter_id": "TCGA-ZH-A8Y3_family_history",
+      "state": "released",
+      "relationship_primary_diagnosis": "Cancer",
+      "created_datetime": "2024-12-19T14:24:26.251585-06:00",
+      "family_history_id": "b5d98e93-4cf7-4058-a98a-ba3b09278b12"
+    }
+  ],
+  "disease_type": "Adenomas and Adenocarcinomas",
+  "case_id": "1947a152-6339-4f66-b9a4-0229580f0287",
+  "follow_ups": [
+    {
+      "timepoint_category": "Not Reported",
+      "follow_up_id": "1d1f28f8-7551-4835-b95d-ff774f4407cb",
+      "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+      "submitter_id": "TCGA-ZH-A8Y3_follow_up3",
+      "ecog_performance_status": "Unknown",
+      "state": "released",
+      "days_to_follow_up": null,
+      "created_datetime": "2024-12-19T14:24:26.251585-06:00"
+    },
+    {
+      "timepoint_category": "Follow-up",
+      "follow_up_id": "5a0f01db-d429-4571-989f-720ef6802410",
+      "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+      "submitter_id": "TCGA-ZH-A8Y3_follow_up2",
+      "disease_response": "WT-With Tumor",
+      "state": "released",
+      "days_to_follow_up": 561,
+      "created_datetime": "2024-12-19T14:24:26.251585-06:00"
+    },
+    {
+      "timepoint_category": "Last Contact",
+      "follow_up_id": "df9cfd19-5536-454f-aaaa-d07d809a41c5",
+      "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+      "submitter_id": "TCGA-ZH-A8Y3_follow_up",
+      "disease_response": "WT-With Tumor",
+      "state": "released",
+      "days_to_follow_up": 561,
+      "created_datetime": "2024-12-19T14:24:26.251585-06:00"
+    },
+    {
+      "follow_up_id": "2463dece-bde4-54a0-b4a6-77c094a1e916"
+    },
+    {
+      "follow_up_id": "c59d9e57-5a15-588a-a0a0-2f2a08ee8478"
+    },
+    {
+      "follow_up_id": "d7444ba8-ae51-5e72-92db-8e767c790203"
+    },
+    {
+      "follow_up_id": "548a1c2f-4d96-5b46-8120-a1834172579b"
+    },
+    {
+      "follow_up_id": "53266639-0a53-5d73-9362-b49b1676b625"
+    },
+    {
+      "follow_up_id": "afde9817-a288-5b7a-9281-1c0137b99b2c"
+    },
+    {
+      "follow_up_id": "960e3388-0423-51a9-b9d2-8667be86fa62"
+    },
+    {
+      "follow_up_id": "b107e1f6-f32e-5ccd-8664-3f3d2dadf0e1"
+    }
+  ],
+  "project": {
+    "primary_site": [
+      "Liver and intrahepatic bile ducts",
+      "Other and unspecified parts of biliary tract",
+      "Pancreas"
+    ],
+    "dbgap_accession_number": null,
+    "project_id": "TCGA-CHOL",
+    "disease_type": [
+      "Adenomas and Adenocarcinomas"
+    ],
+    "name": "Cholangiocarcinoma",
+    "releasable": true,
+    "state": "open",
+    "released": true
+  },
+  "submitter_id": "TCGA-ZH-A8Y3",
+  "diagnoses": [
+    {
+      "synchronous_malignancy": "No",
+      "ajcc_pathologic_stage": "Stage II",
+      "ishak_fibrosis_score": "Unknown",
+      "days_to_diagnosis": 0,
+      "created_datetime": null,
+      "treatments": [
+        {
+          "treatment_intent_type": "Adjuvant",
+          "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+          "treatment_id": "371ecde0-393d-5a2a-a522-80255964813c",
+          "submitter_id": "TCGA-ZH-A8Y3_treatment",
+          "treatment_type": "Pharmaceutical Therapy, NOS",
+          "treatment_outcome": "Not Reported",
+          "state": "released",
+          "therapeutic_agents": null,
+          "treatment_or_therapy": "yes",
+          "created_datetime": null
+        },
+        {
+          "treatment_intent_type": "Adjuvant",
+          "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+          "treatment_id": "5458272c-69be-41de-9a28-6cfb4aa3fca8",
+          "submitter_id": "TCGA-ZH-A8Y3_treatment4",
+          "treatment_type": "Ablation or Embolization, NOS",
+          "state": "released",
+          "treatment_or_therapy": "no",
+          "created_datetime": "2024-12-19T14:24:26.251585-06:00"
+        },
+        {
+          "treatment_intent_type": "Adjuvant",
+          "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+          "treatment_id": "81b529ec-d250-46a6-8acd-2111d07d739f",
+          "submitter_id": "TCGA-ZH-A8Y3_treatment2",
+          "treatment_type": "Radiation Therapy, NOS",
+          "treatment_outcome": "Not Reported",
+          "state": "released",
+          "treatment_or_therapy": "yes",
+          "created_datetime": "2024-12-19T14:24:26.251585-06:00"
+        },
+        {
+          "updated_datetime": "2024-12-23T09:53:56.999238-06:00",
+          "treatment_id": "9799edc0-9508-46f2-bc49-0179b25139c6",
+          "submitter_id": "TCGA-ZH-A8Y3_treatment3",
+          "treatment_type": "Surgery, NOS",
+          "state": "released",
+          "treatment_or_therapy": "yes",
+          "created_datetime": "2024-12-19T14:24:26.251585-06:00",
+          "initial_disease_status": "Initial Diagnosis"
+        }
+      ],
+      "last_known_disease_status": null,
+      "tissue_or_organ_of_origin": "Intrahepatic bile duct",
+      "days_to_last_follow_up": 561.0,
+      "age_at_diagnosis": 22436,
+      "primary_diagnosis": "Cholangiocarcinoma",
+      "child_pugh_classification": "Unknown",
+      "updated_datetime": "2025-10-24T10:07:22.247220-05:00",
+      "prior_malignancy": "no",
+      "year_of_diagnosis": 2010,
+      "state": "released",
+      "prior_treatment": "No",
+      "diagnosis_is_primary_disease": true,
+      "days_to_last_known_disease_status": null,
+      "ajcc_staging_system_edition": "7th",
+      "ajcc_pathologic_t": "T2a",
+      "days_to_recurrence": null,
+      "morphology": "8160/3",
+      "ajcc_pathologic_n": "N0",
+      "ajcc_pathologic_m": "M0",
+      "submitter_id": "TCGA-ZH-A8Y3_diagnosis",
+      "residual_disease": "R1",
+      "classification_of_tumor": "primary",
+      "diagnosis_id": "3556cad4-74f7-5d42-8900-732921a5234a",
+      "icd_10_code": "C22.1",
+      "site_of_resection_or_biopsy": "Biliary tract, NOS",
+      "tumor_grade": "G2",
+      "progression_or_recurrence": null
+    }
+  ],
+  "samples": [
+    {
+      "intermediate_dimension": null,
+      "tumor_descriptor": "Not Applicable",
+      "time_between_clamping_and_freezing": null,
+      "sample_id": "58aee992-591d-4201-8649-d87a41bfff9e",
+      "freezing_method": null,
+      "pathology_report_uuid": null,
+      "submitter_id": "TCGA-ZH-A8Y3-10A",
+      "tumor_code_id": null,
+      "shortest_dimension": null,
+      "sample_type": "Blood Derived Normal",
+      "created_datetime": null,
+      "time_between_excision_and_freezing": null,
+      "specimen_type": "Peripheral Blood NOS",
+      "updated_datetime": "2023-11-08T11:20:17.067175-06:00",
+      "days_to_sample_procurement": null,
+      "longest_dimension": null,
+      "days_to_collection": 1309,
+      "state": "released",
+      "current_weight": null,
+      "initial_weight": null,
+      "tissue_type": "Normal",
+      "preservation_method": "Unknown",
+      "portions": [
+        {
+          "portion_id": "69e9bf47-5287-42d6-8487-e74550e061dd",
+          "analytes": [
+            {
+              "amount": null,
+              "experimental_protocol_type": "Pre-extracted DNA received by TSS",
+              "aliquots": [
+                {
+                  "aliquot_quantity": 1.6,
+                  "amount": null,
+                  "aliquot_id": "304ba72b-9a54-4ae8-a718-d11980075aea",
+                  "source_center": "23",
+                  "analyte_type": null,
+                  "updated_datetime": "2025-01-28T00:30:32.095041-06:00",
+                  "submitter_id": "TCGA-ZH-A8Y3-10A-01D-A46P-09",
+                  "concentration": 0.08,
+                  "state": "released",
+                  "aliquot_volume": 20.0,
+                  "created_datetime": null
+                },
+                {
+                  "no_matched_normal_targeted_sequencing": null,
+                  "amount": null,
+                  "selected_normal_wgs": true,
+                  "selected_normal_low_pass_wgs": null,
+                  "submitter_id": "TCGA-ZH-A8Y3-10A-01D-A75W-36",
+                  "concentration": 0.16,
+                  "no_matched_normal_wgs": null,
+                  "aliquot_volume": 15.0,
+                  "created_datetime": "2018-11-28T10:11:06.964460-06:00",
+                  "aliquot_quantity": 2.4,
+                  "aliquot_id": "b5d6345e-464d-4b42-ad5a-64352e42b1f2",
+                  "source_center": "23",
+                  "analyte_type": null,
+                  "updated_datetime": "2025-01-28T00:30:33.709552-06:00",
+                  "selected_normal_wxs": null,
+                  "no_matched_normal_low_pass_wgs": null,
+                  "state": "released",
+                  "no_matched_normal_wxs": null,
+                  "selected_normal_targeted_sequencing": null
+                }
+              ],
+              "submitter_id": "TCGA-ZH-A8Y3-10A-01D",
+              "concentration": 0.16,
+              "created_datetime": null,
+              "analyte_id": "b8b062bf-7f7e-42cf-8c2c-3591b1c90381",
+              "well_number": null,
+              "analyte_type": "DNA",
+              "updated_datetime": "2025-01-28T00:30:30.793439-06:00",
+              "spectrophotometer_method": "PicoGreen",
+              "normal_tumor_genotype_snp_match": "Yes",
+              "state": "released",
+              "a260_a280_ratio": null
+            }
+          ],
+          "updated_datetime": "2018-11-28T10:11:06.964460-06:00",
+          "weight": null,
+          "submitter_id": "TCGA-ZH-A8Y3-10A-01",
+          "creation_datetime": 1386892800,
+          "state": "released",
+          "portion_number": "01",
+          "is_ffpe": false,
+          "created_datetime": null
+        }
+      ]
+    },
+    {
+      "tumor_descriptor": "Primary",
+      "specimen_type": "Solid Tissue",
+      "updated_datetime": "2023-11-08T11:17:54.822487-06:00",
+      "days_to_sample_procurement": 0,
+      "sample_id": "9152a39a-b38b-4751-bcb4-846ce8c6c7b2",
+      "submitter_id": "TCGA-ZH-A8Y3-01Z",
+      "state": "released",
+      "sample_type": "Primary Tumor",
+      "tissue_type": "Tumor",
+      "preservation_method": "FFPE",
+      "created_datetime": "2018-05-11T15:55:41.021842-05:00",
+      "portions": [
+        {
+          "portion_id": "77dbca7a-c5ce-5865-ae30-b7186eb71477"
+        }
+      ]
+    },
+    {
+      "intermediate_dimension": null,
+      "tumor_descriptor": "Primary",
+      "time_between_clamping_and_freezing": null,
+      "sample_id": "f90ab603-c149-4758-a3fc-6bf762ff4987",
+      "freezing_method": null,
+      "pathology_report_uuid": "C4E66BC9-DCF0-43A6-B6B8-24D8FC02A7DB",
+      "submitter_id": "TCGA-ZH-A8Y3-01A",
+      "tumor_code_id": null,
+      "shortest_dimension": null,
+      "sample_type": "Primary Tumor",
+      "created_datetime": null,
+      "time_between_excision_and_freezing": null,
+      "specimen_type": "Unknown",
+      "updated_datetime": "2025-01-28T00:30:19.690442-06:00",
+      "days_to_sample_procurement": null,
+      "longest_dimension": null,
+      "days_to_collection": 1309,
+      "state": "released",
+      "current_weight": null,
+      "initial_weight": 290.0,
+      "tissue_type": "Tumor",
+      "preservation_method": "Unknown",
+      "portions": [
+        {
+          "portion_id": "68c80220-decd-4537-9cd9-5ed32b7b9e8a",
+          "analytes": [
+            {
+              "amount": null,
+              "experimental_protocol_type": "aDNA Preparation Type",
+              "aliquots": [
+                {
+                  "no_matched_normal_targeted_sequencing": null,
+                  "amount": null,
+                  "selected_normal_wgs": null,
+                  "selected_normal_low_pass_wgs": null,
+                  "submitter_id": "TCGA-ZH-A8Y3-01A-11D-A75W-36",
+                  "concentration": 0.17,
+                  "no_matched_normal_wgs": null,
+                  "aliquot_volume": 15.0,
+                  "created_datetime": "2018-11-28T10:11:06.964460-06:00",
+                  "aliquot_quantity": 2.55,
+                  "aliquot_id": "8c966a3a-f6b8-4ad1-955f-c365ff00bc71",
+                  "source_center": "23",
+                  "analyte_type": null,
+                  "updated_datetime": "2025-01-28T00:30:23.803435-06:00",
+                  "selected_normal_wxs": null,
+                  "no_matched_normal_low_pass_wgs": null,
+                  "state": "released",
+                  "no_matched_normal_wxs": null,
+                  "selected_normal_targeted_sequencing": null
+                },
+                {
+                  "aliquot_quantity": 1.6,
+                  "amount": null,
+                  "aliquot_id": "a8247f65-90b7-44c3-b45d-2a6b2e48bd40",
+                  "source_center": "23",
+                  "analyte_type": null,
+                  "updated_datetime": "2025-01-28T00:30:22.297754-06:00",
+                  "submitter_id": "TCGA-ZH-A8Y3-01A-11D-A46P-09",
+                  "concentration": 0.08,
+                  "state": "released",
+                  "aliquot_volume": 20.0,
+                  "created_datetime": null
+                }
+              ],
+              "submitter_id": "TCGA-ZH-A8Y3-01A-11D",
+              "concentration": 0.17,
+              "created_datetime": null,
+              "analyte_id": "0bdd6b71-4885-4f74-bfee-20a8a20ce2d5",
+              "well_number": null,
+              "analyte_type": "DNA",
+              "updated_datetime": "2025-01-28T00:30:21.055487-06:00",
+              "spectrophotometer_method": "PicoGreen",
+              "normal_tumor_genotype_snp_match": "Yes",
+              "state": "released",
+              "a260_a280_ratio": null
+            }
+          ],
+          "updated_datetime": "2018-11-28T10:11:06.964460-06:00",
+          "weight": 30.0,
+          "submitter_id": "TCGA-ZH-A8Y3-01A-11",
+          "creation_datetime": 1387756800,
+          "state": "released",
+          "portion_number": "11",
+          "is_ffpe": false,
+          "created_datetime": null
+        }
+      ]
+    }
+  ],
+  "demographic": {
+    "race": "black or african american",
+    "gender": "female",
+    "ethnicity": "not hispanic or latino",
+    "vital_status": "Dead",
+    "age_at_index": 61,
+    "submitter_id": "TCGA-ZH-A8Y3_demographic",
+    "days_to_birth": -22436,
+    "created_datetime": null,
+    "year_of_birth": null,
+    "demographic_id": "53268d1c-ab8b-5ccd-a865-473041c9e7b5",
+    "updated_datetime": "2025-10-16T15:41:40.414307-05:00",
+    "age_is_obfuscated": false,
+    "days_to_death": 561,
+    "state": "released",
+    "sex_at_birth": "female",
+    "year_of_death": null,
+    "country_of_residence_at_enrollment": "United States"
+  }
+}

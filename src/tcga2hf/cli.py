@@ -1,0 +1,274 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from dotenv import load_dotenv
+
+from tcga2hf import (
+    clinical,
+    dataset_card,
+    expression,
+    genomic,
+    hf_upload,
+    mutations,
+)
+from tcga2hf.gdc import GDCClient, write_cases_json
+
+# Load .env from cwd (or any parent) on import. override=True so the project's
+# .env wins over any inherited shell variable: the HF_TOKEN here is scoped to
+# this project, and we don't want a stale global token to silently take over.
+load_dotenv(override=True)
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Download public TCGA data from the NCI GDC and stage it for the HF Hub.",
+)
+
+DEFAULT_DATA_DIR = Path.home() / "data" / "tcga2hf"
+
+
+def _resolve_data_dir(data_dir: Path | None) -> Path:
+    if data_dir is not None:
+        return data_dir
+    env = os.environ.get("TCGA2HF_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    return DEFAULT_DATA_DIR
+
+
+DataDirOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--data-dir",
+        help="Root data dir. Defaults to $TCGA2HF_DATA_DIR or $HOME/data/tcga2hf.",
+    ),
+]
+
+
+@app.command("fetch-clinical")
+def fetch_clinical_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable), e.g. --project TCGA-CHOL --project TCGA-DLBC.",
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Fetch clinical case JSON for one or more TCGA projects from the GDC."""
+    import hashlib
+
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    typer.echo(f"raw dir: {raw_dir}")
+
+    with GDCClient() as client:
+        # Snapshot the GDC server's data release once at the top so every project
+        # fetched in this invocation pairs with the same release tag.
+        status = client.status()
+        release_str = status.get("data_release", "<unknown>")
+        typer.echo(f"GDC: {release_str} (tag {status.get('tag', '?')})")
+
+        # Capture the dictionary alongside, tagged by release. Reuses the cached
+        # copy if a fetch with the same release already happened locally.
+        version = status.get("data_release_version") or {}
+        major = version.get("major", "x")
+        minor = version.get("minor", "y")
+        dict_path = raw_dir / f"gdc_dictionary.{major}.{minor}.json"
+        if not dict_path.exists():
+            typer.echo(f"capturing GDC dictionary -> {dict_path.name} ...")
+            dict_path.parent.mkdir(parents=True, exist_ok=True)
+            dictionary = client.dictionary()
+            dict_text = json.dumps(dictionary, indent=2, sort_keys=True)
+            dict_path.write_text(dict_text)
+        else:
+            dict_text = dict_path.read_text()
+        # SHA-256 of the (sorted) dictionary JSON pins provenance precisely
+        # without needing to diff 10MB blobs across runs.
+        status["_gdc_dictionary_sha256"] = hashlib.sha256(dict_text.encode()).hexdigest()
+        status["_gdc_dictionary_path"] = dict_path.name
+
+        for proj in project:
+            typer.echo(f"fetching {proj} ...")
+            cases = clinical.fetch_clinical([proj], client)
+            out_path = raw_dir / proj / "cases.json"
+            write_cases_json(cases, out_path)
+            (raw_dir / proj / "gdc_status.json").write_text(json.dumps(status, indent=2))
+            typer.echo(f"  wrote {len(cases)} cases -> {out_path}")
+
+
+def _fetch_modality(
+    project: list[str],
+    data_dir: Path | None,
+    data_type: str,
+    modality_dir: str,
+) -> None:
+    """Shared body for fetch-mutations / fetch-expression / future modalities."""
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    typer.echo(f"raw dir: {raw_dir}")
+
+    with GDCClient() as client:
+        status = client.status()
+        typer.echo(f"GDC: {status.get('data_release', '<unknown>')} (tag {status.get('tag', '?')})")
+        for proj in project:
+            out_dir = raw_dir / proj / modality_dir
+            typer.echo(f"fetching {data_type!r} for {proj} -> {out_dir}")
+            manifest = genomic.fetch_files(client, proj, data_type, out_dir)
+            n_dl = sum(1 for m in manifest if m["_status"] == "downloaded")
+            n_cache = sum(1 for m in manifest if m["_status"] == "cached")
+            total_mb = sum((m.get("file_size") or 0) for m in manifest) / 1e6
+            typer.echo(
+                f"  {len(manifest):>4} files ({n_dl} downloaded, {n_cache} cached), "
+                f"{total_mb:.1f} MB total"
+            )
+            (raw_dir / proj / "gdc_status.json").write_text(json.dumps(status, indent=2))
+
+
+@app.command("fetch-mutations")
+def fetch_mutations_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads open-access Masked Somatic Mutation MAFs.",  # noqa: E501
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Download open-access Masked Somatic Mutation MAF files (DNA)."""
+    _fetch_modality(project, data_dir, "Masked Somatic Mutation", "mutations")
+
+
+@app.command("fetch-expression")
+def fetch_expression_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads open-access RNA-Seq STAR gene-count TSVs.",  # noqa: E501
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Download open-access Gene Expression Quantification TSVs (RNA-Seq, STAR counts)."""
+    _fetch_modality(project, data_dir, "Gene Expression Quantification", "expression")
+
+
+@app.command("build")
+def build_cmd(
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Flatten raw clinical JSON into per-project patient Parquets + dataset card."""
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    processed_dir = root / "processed"
+    typer.echo(f"raw dir:       {raw_dir}")
+    typer.echo(f"processed dir: {processed_dir}")
+
+    if not raw_dir.exists():
+        raise typer.BadParameter(f"raw dir does not exist: {raw_dir}. Run fetch-clinical first.")
+
+    project_files = sorted(raw_dir.glob("*/cases.json"))
+    if not project_files:
+        raise typer.BadParameter(f"no cases.json files found under {raw_dir}.")
+
+    # Wipe the whole processed/ tree so removed projects + any legacy layout
+    # (e.g. the old patients/ directory) don't leave stale data behind.
+    if processed_dir.exists():
+        shutil.rmtree(processed_dir)
+    processed_dir.mkdir(parents=True)
+
+    projects: list[str] = []
+    gdc_releases: dict[str, str] = {}
+    for path in project_files:
+        proj = path.parent.name
+        projects.append(proj)
+        cases = json.loads(path.read_text())
+        rows = clinical.to_patient_rows(cases)
+
+        # Attach molecular modalities if their raw data has been fetched.
+        mut_by_case = mutations.load_for_project(path.parent)
+        expr_by_case = expression.load_for_project(path.parent)
+        if mut_by_case:
+            mutations.attach(rows, mut_by_case)
+        if expr_by_case:
+            expression.attach(rows, expr_by_case)
+
+        n_variants = sum(len(r["samples_masked_somatic_mutation"]) for r in rows)
+        n_expr = sum(len(r["samples_gene_expression_quantification"]) for r in rows)
+        typer.echo(
+            f"  {proj:<12} {len(rows):>4} patients  "
+            f"mutations={n_variants:>5} ({len(mut_by_case)} MAFs)  "
+            f"expression={n_expr:>4} aliquots ({len(expr_by_case)} TSVs)"
+        )
+
+        out = clinical.write_patients(rows, processed_dir, proj)
+        typer.echo(f"             -> {out}")
+
+        status_path = path.parent / "gdc_status.json"
+        if status_path.exists():
+            status = json.loads(status_path.read_text())
+            gdc_releases[proj] = status.get("data_release", "<unknown>")
+
+    card = dataset_card.write_card(processed_dir, projects, gdc_releases=gdc_releases)
+    typer.echo(f"wrote dataset card -> {card}")
+    typer.echo(f"done. processed tree at: {processed_dir}")
+
+
+@app.command("upload")
+def upload_cmd(
+    repo_id: Annotated[
+        str,
+        typer.Option(
+            "--repo-id",
+            help="HF dataset repo id, e.g. galtay/tcga-patients-open.",
+        ),
+    ],
+    private: Annotated[
+        bool,
+        typer.Option(
+            "--private/--public",
+            help="Upload as private (default) or public. Recommend private for first pushes.",
+        ),
+    ] = True,
+    commit_message: Annotated[
+        str | None,
+        typer.Option(
+            "--commit-message",
+            "-m",
+            help="Commit message for this upload.",
+        ),
+    ] = None,
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Push <data-dir>/processed/ to a HuggingFace dataset repo."""
+    root = _resolve_data_dir(data_dir)
+    processed_dir = root / "processed"
+    visibility = "private" if private else "PUBLIC"
+    typer.echo(f"processed dir: {processed_dir}")
+    typer.echo(f"repo_id:       {repo_id} ({visibility})")
+    if not private:
+        typer.confirm(
+            f"This will publish {repo_id} as PUBLIC. Continue?",
+            abort=True,
+        )
+
+    url = hf_upload.upload_dataset(
+        processed_dir=processed_dir,
+        repo_id=repo_id,
+        private=private,
+        commit_message=commit_message,
+    )
+    typer.echo(f"\nuploaded -> {url}")
+
+
+if __name__ == "__main__":
+    app()
