@@ -11,12 +11,18 @@ def upload_dataset(
     private: bool = True,
     commit_message: str | None = None,
     token: str | None = None,
+    delete_patterns: list[str] | None = None,
 ) -> str:
     """Push <processed_dir> to a HuggingFace dataset repo, creating it if needed.
 
     The directory should contain README.md (with `configs:` YAML frontmatter)
     and patients/<PROJECT>.parquet files — i.e. the exact tree produced by
     `tcga2hf build`.
+
+    `delete_patterns` lets the upload remove existing files in the remote
+    repo that match a glob (e.g. `["*/train.parquet"]` when migrating away
+    from an old layout). Files are deleted as part of the same commit as the
+    upload, so the repo never appears in a half-migrated state.
 
     Auth: pass `token` explicitly, or set HF_TOKEN, or run `huggingface-cli login`
     first. Returns the URL of the dataset on success.
@@ -38,5 +44,6 @@ def upload_dataset(
         repo_id=repo_id,
         repo_type="dataset",
         commit_message=commit_message or "Update TCGA patients (open access) dataset",
+        delete_patterns=delete_patterns,
     )
     return f"https://huggingface.co/datasets/{repo_id}"

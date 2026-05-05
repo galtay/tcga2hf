@@ -33,7 +33,7 @@ from tcga2hf.models import (
 
 PROCESSED = Path.home() / "data/tcga2hf/processed"
 LIVE_REQUIRED = pytest.mark.skipif(
-    not (PROCESSED / "TCGA-CHOL/train.parquet").exists(),
+    not (PROCESSED / "TCGA-CHOL/data.parquet").exists(),
     reason="run `tcga2hf build` first to populate $HOME/data/tcga2hf/processed",
 )
 
@@ -254,7 +254,7 @@ def test_timeline_includes_clinical_and_biospecimen_on_same_anchor() -> None:
 
 @LIVE_REQUIRED
 def test_round_trip_real_chol_patient() -> None:
-    rows = pq.read_table(PROCESSED / "TCGA-CHOL/train.parquet").to_pylist()
+    rows = pq.read_table(PROCESSED / "TCGA-CHOL/data.parquet").to_pylist()
     target = next(r for r in rows if r["case_submitter_id"] == "TCGA-W5-AA39")
     p = TcgaHfPatient.model_validate(target)
 

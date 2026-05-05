@@ -176,7 +176,7 @@ _ROW_GROUP_SIZE = 50
 
 
 def write_patients(rows: list[dict[str, Any]], processed_dir: Path, project_id: str) -> Path:
-    """Write a single project's patient rows to <project_id>/train.parquet.
+    """Write a single project's patient rows to <project_id>/data.parquet.
 
     The per-project directory layout matches the HuggingFace `configs:` convention
     so each TCGA project surfaces as its own loadable subset.
@@ -185,7 +185,7 @@ def write_patients(rows: list[dict[str, Any]], processed_dir: Path, project_id: 
     a page index is written so the Viewer can read only the bytes it needs to
     render a page of rows rather than scanning the whole row group.
     """
-    out_path = processed_dir / project_id / "train.parquet"
+    out_path = processed_dir / project_id / "data.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(rows, schema=PATIENTS)
     pq.write_table(

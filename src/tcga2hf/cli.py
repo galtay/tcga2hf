@@ -16,8 +16,10 @@ from tcga2hf import (
     genomic,
     hf_upload,
     mutations,
+    tabular,
 )
 from tcga2hf.gdc import GDCClient, write_cases_json
+from tcga2hf.schema import TABULAR_TABLES
 
 # Load .env from cwd (or any parent) on import. override=True so the project's
 # .env wins over any inherited shell variable: the HF_TOKEN here is scoped to
@@ -223,6 +225,85 @@ def build_cmd(
     typer.echo(f"done. processed tree at: {processed_dir}")
 
 
+@app.command("build-tabular")
+def build_tabular_cmd(
+    project: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--project",
+            help=(
+                "TCGA project id (repeatable). If omitted, all projects under "
+                "<data-dir>/raw/ are processed."
+            ),
+        ),
+    ] = None,
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Flatten raw TCGA data into per-(project, table) Parquets + dataset card.
+
+    Companion to `build`: same raw inputs, different output shape — one HF
+    subset per (project, table) under <data-dir>/processed_tabular/.
+    """
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    processed_dir = root / "processed_tabular"
+    typer.echo(f"raw dir:       {raw_dir}")
+    typer.echo(f"processed dir: {processed_dir}")
+
+    if not raw_dir.exists():
+        raise typer.BadParameter(f"raw dir does not exist: {raw_dir}. Run fetch-clinical first.")
+
+    project_files = sorted(raw_dir.glob("*/cases.json"))
+    if project:
+        wanted = set(project)
+        project_files = [p for p in project_files if p.parent.name in wanted]
+        missing = wanted - {p.parent.name for p in project_files}
+        if missing:
+            raise typer.BadParameter(
+                f"requested projects missing from raw/: {sorted(missing)}"
+            )
+    if not project_files:
+        raise typer.BadParameter(f"no cases.json files found under {raw_dir}.")
+
+    # Wipe any prior tabular tree so removed projects/tables don't leave
+    # stale data behind.
+    if processed_dir.exists():
+        shutil.rmtree(processed_dir)
+    processed_dir.mkdir(parents=True)
+
+    projects: list[str] = []
+    gdc_releases: dict[str, str] = {}
+    for path in project_files:
+        proj = path.parent.name
+        projects.append(proj)
+        cases = json.loads(path.read_text())
+        tables = tabular.build_tables(cases, path.parent)
+
+        sizes = {name: len(rows) for name, rows in tables.items()}
+        # Compact one-line summary of row counts per table — easier to spot
+        # cardinality regressions than scrolling through 14 lines per project.
+        summary = " ".join(f"{name}={n}" for name, n in sizes.items())
+        typer.echo(f"  {proj:<12} {summary}")
+
+        out_paths = tabular.write_tables(tables, processed_dir, proj)
+        # Use any one table's path to print the project's output dir.
+        typer.echo(f"             -> {next(iter(out_paths.values())).parent.parent}")
+
+        status_path = path.parent / "gdc_status.json"
+        if status_path.exists():
+            status = json.loads(status_path.read_text())
+            gdc_releases[proj] = status.get("data_release", "<unknown>")
+
+    card = dataset_card.write_tabular_card(
+        processed_dir,
+        projects,
+        list(TABULAR_TABLES),
+        gdc_releases=gdc_releases,
+    )
+    typer.echo(f"wrote dataset card -> {card}")
+    typer.echo(f"done. processed_tabular tree at: {processed_dir}")
+
+
 @app.command("upload")
 def upload_cmd(
     repo_id: Annotated[
@@ -252,6 +333,52 @@ def upload_cmd(
     """Push <data-dir>/processed/ to a HuggingFace dataset repo."""
     root = _resolve_data_dir(data_dir)
     processed_dir = root / "processed"
+    visibility = "private" if private else "PUBLIC"
+    typer.echo(f"processed dir: {processed_dir}")
+    typer.echo(f"repo_id:       {repo_id} ({visibility})")
+    if not private:
+        typer.confirm(
+            f"This will publish {repo_id} as PUBLIC. Continue?",
+            abort=True,
+        )
+
+    url = hf_upload.upload_dataset(
+        processed_dir=processed_dir,
+        repo_id=repo_id,
+        private=private,
+        commit_message=commit_message,
+    )
+    typer.echo(f"\nuploaded -> {url}")
+
+
+@app.command("upload-tabular")
+def upload_tabular_cmd(
+    repo_id: Annotated[
+        str,
+        typer.Option(
+            "--repo-id",
+            help="HF dataset repo id, e.g. gabrielaltay/tcga-tabular-open.",
+        ),
+    ],
+    private: Annotated[
+        bool,
+        typer.Option(
+            "--private/--public",
+            help="Upload as private (default) or public.",
+        ),
+    ] = True,
+    commit_message: Annotated[
+        str | None,
+        typer.Option("--commit-message", "-m", help="Commit message for this upload."),
+    ] = None,
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Push <data-dir>/processed_tabular/ to a HuggingFace dataset repo.
+
+    Companion to `upload`: same shape, just points at the tabular tree.
+    """
+    root = _resolve_data_dir(data_dir)
+    processed_dir = root / "processed_tabular"
     visibility = "private" if private else "PUBLIC"
     typer.echo(f"processed dir: {processed_dir}")
     typer.echo(f"repo_id:       {repo_id} ({visibility})")

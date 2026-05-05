@@ -15,29 +15,57 @@ from typing import Any
 
 from tcga2hf.gdc import GDCClient, and_, eq
 
-# Fields we always pull on each /files hit so the manifest carries enough
-# provenance to build patient-keyed tables later without re-querying GDC.
+# Fields we request on each /files hit. The GDC `/files` endpoint
+# *replaces* the default response with whatever you list here (it does
+# NOT append to a default), so this enumerates every field our pipeline
+# consumes — file metadata we save into the manifest, plus the case and
+# aliquot linkages we need for downstream join logic. Trimmed to only
+# what's actually read; cf. `expression._file_aliquot_and_case` for the
+# reason `cases.samples.portions.analytes.aliquots.aliquot_id` is in
+# here despite looking deep.
+#
+# `analysis.workflow_type` is the canonical GDC path — the unprefixed
+# `workflow_type` comes back as an unrecognized field warning. Flattened
+# to a top-level `workflow_type` column at manifest-write time.
 FILE_FIELDS: list[str] = [
     "file_id",
     "file_name",
     "file_size",
     "md5sum",
+    "access",
     "data_category",
     "data_type",
     "data_format",
     "experimental_strategy",
-    "workflow_type",
-    "access",
+    "analysis.workflow_type",
     "cases.case_id",
     "cases.submitter_id",
-    "cases.project.project_id",
-    "cases.samples.sample_id",
-    "cases.samples.submitter_id",
-    "cases.samples.sample_type",
-    "cases.samples.tissue_type",
     "cases.samples.portions.analytes.aliquots.aliquot_id",
-    "cases.samples.portions.analytes.aliquots.submitter_id",
 ]
+
+
+# Per-modality filter values that lock the `/files` request to the exact
+# tooling we expect. Filtering on `data_type` alone is technically enough
+# for TCGA today, but adding `data_format` + `experimental_strategy` +
+# `analysis.workflow_type` guards against future GDC additions silently
+# shipping different workflows under the same data_type. Values verified
+# against live `/files` responses on 2026-05; if any of them changes
+# upstream the filter will return zero hits and surface the regression
+# loudly.
+MODALITY_FILTERS: dict[str, dict[str, str]] = {
+    "Masked Somatic Mutation": {
+        "data_format": "MAF",
+        "data_category": "Simple Nucleotide Variation",
+        "experimental_strategy": "WXS",
+        "analysis.workflow_type": "Aliquot Ensemble Somatic Variant Merging and Masking",
+    },
+    "Gene Expression Quantification": {
+        "data_format": "TSV",
+        "data_category": "Transcriptome Profiling",
+        "experimental_strategy": "RNA-Seq",
+        "analysis.workflow_type": "STAR - Counts",
+    },
+}
 
 
 def list_open_files(
@@ -46,12 +74,23 @@ def list_open_files(
     data_type: str,
     extra_filters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return all open-access /files hits for the given project + data_type."""
+    """Return all open-access /files hits for the given project + data_type.
+
+    Filter clauses:
+      - cases.project.project_id = <project_id>
+      - access = "open"
+      - data_type = <data_type>
+      - …plus every key/value pair in `MODALITY_FILTERS[data_type]` (locks
+        format, experimental_strategy, workflow_type for the modalities we
+        explicitly support).
+    """
     clauses = [
         eq("cases.project.project_id", project_id),
         eq("access", "open"),
         eq("data_type", data_type),
     ]
+    for field, value in MODALITY_FILTERS.get(data_type, {}).items():
+        clauses.append(eq(field, value))
     if extra_filters:
         clauses.extend(extra_filters)
     return client.files(filters=and_(*clauses), fields=FILE_FIELDS, page_size=500)
@@ -92,16 +131,22 @@ def fetch_files(
 
     manifest: list[dict[str, Any]] = []
     for hit in hits:
+        # GDC nests workflow info under `analysis.*`; flatten it into the
+        # manifest so downstream consumers see a single `workflow_type`
+        # column matching the dataset's `files` schema.
+        analysis = hit.get("analysis") or {}
         manifest.append(
             {
                 "file_id": hit["file_id"],
                 "file_name": hit["file_name"],
                 "file_size": hit.get("file_size"),
                 "md5sum": hit.get("md5sum"),
+                "data_category": hit.get("data_category"),
                 "data_type": hit.get("data_type"),
                 "data_format": hit.get("data_format"),
                 "experimental_strategy": hit.get("experimental_strategy"),
-                "workflow_type": hit.get("workflow_type"),
+                "workflow_type": analysis.get("workflow_type"),
+                "access": hit.get("access"),
                 "cases": hit.get("cases", []),
                 "_status": "cached" if hit["file_id"] in cached_ids else "downloaded",
             }

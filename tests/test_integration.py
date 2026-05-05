@@ -27,7 +27,7 @@ PROCESSED = Path.home() / "data/tcga2hf/processed"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not (PROCESSED / "TCGA-CHOL/train.parquet").exists(),
+        not (PROCESSED / "TCGA-CHOL/data.parquet").exists(),
         reason="run `tcga2hf build` first to populate $HOME/data/tcga2hf/processed",
     ),
 ]
@@ -38,7 +38,7 @@ def all_patients() -> list[TcgaHfPatient]:
     """Validate every row from every project parquet through TcgaHfPatient."""
     patients: list[TcgaHfPatient] = []
     for project_dir in sorted(PROCESSED.glob("TCGA-*")):
-        rows = pq.read_table(project_dir / "train.parquet").to_pylist()
+        rows = pq.read_table(project_dir / "data.parquet").to_pylist()
         for row in rows:
             patients.append(TcgaHfPatient.model_validate(row))
     return patients

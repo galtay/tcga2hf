@@ -147,7 +147,7 @@ def test_samples_sorted_by_days_to_collection_then_id() -> None:
 def test_write_patients_parquet_round_trip(one_case: list[dict], tmp_path: Path) -> None:
     rows = clinical.to_patient_rows(one_case)
     out = clinical.write_patients(rows, tmp_path, project_id="TCGA-CHOL")
-    assert out == tmp_path / "TCGA-CHOL" / "train.parquet"
+    assert out == tmp_path / "TCGA-CHOL" / "data.parquet"
     assert out.exists()
 
     table = pq.read_table(out)
@@ -303,7 +303,7 @@ def test_write_card_emits_one_config_per_project(tmp_path: Path) -> None:
     assert "config_name: TCGA-DLBC" in front
     assert front.index("config_name: TCGA-CHOL") < front.index("config_name: TCGA-DLBC")
 
-    # Per-project data_files glob with explicit train split.
-    assert "path: TCGA-CHOL/*.parquet" in front
-    assert "path: TCGA-DLBC/*.parquet" in front
+    # Per-project data_files path with explicit train split.
+    assert "path: TCGA-CHOL/data.parquet" in front
+    assert "path: TCGA-DLBC/data.parquet" in front
     assert "split: train" in front

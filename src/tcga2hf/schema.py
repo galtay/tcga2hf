@@ -710,3 +710,109 @@ PATIENT_FIELDS: list[pa.Field] = [
 ]
 
 PATIENTS = pa.schema(PATIENT_FIELDS)
+
+
+# ---------------------------------------------------------------------------
+# Tabular-dataset schemas (one row per GDC entity, one row per source-TSV row)
+#
+# Companion to the consolidated PATIENT_FIELDS layout. Same source data,
+# decomposed into per-entity flat tables. FK columns (`case_id` etc.) are
+# prepended to every child table so a user can join with a single key; we
+# also pair every UUID FK with its `*_submitter_id` so HF Data Studio rows
+# show human-readable values without needing extra joins.
+#
+# Built by `tcga2hf build-tabular` and published to a separate HF dataset
+# (`gabrielaltay/tcga-tabular-open`).
+# ---------------------------------------------------------------------------
+
+
+# Reusable FK blocks for the flat molecular tables.
+_CASE_FKS: list[pa.Field] = [
+    pa.field("case_id", pa.string()),
+    pa.field("case_submitter_id", pa.string()),
+]
+_ALIQUOT_FKS: list[pa.Field] = [
+    pa.field("aliquot_id", pa.string()),
+    pa.field("aliquot_submitter_id", pa.string()),
+]
+
+
+# Cases: one row per patient with the GDC `cases.json` structure preserved.
+# Mirrors PATIENT_FIELDS minus the two molecular columns (those have their
+# own flat tables below). Each top-level JSON key in the GDC `/cases`
+# response maps to one column here — scalars stay scalar, struct fields
+# stay struct, list-of-struct fields stay list-of-struct. The table name
+# `cases` matches the source file name (`cases.json`).
+TABULAR_CASES_FIELDS: list[pa.Field] = [
+    f
+    for f in PATIENT_FIELDS
+    if f.name
+    not in {
+        "samples_masked_somatic_mutation",
+        "samples_gene_expression_quantification",
+    }
+]
+
+# Mutations: MUTATION_FIELDS already carries `case_id` (column 132 of the
+# MAF), `tumor_sample_id`, `matched_normal_sample_id`, `source_file_id`. We
+# prepend `case_submitter_id` for browseability and otherwise ship the MAF
+# verbatim — same shape as the consolidated dataset's nested struct, just
+# emitted as one row per variant.
+TABULAR_MUTATIONS_FIELDS: list[pa.Field] = [
+    pa.field("case_submitter_id", pa.string()),
+    *MUTATION_FIELDS,
+]
+
+# Expression: one row per source-TSV row (4 N_* QC rows + ~60660 gene rows
+# per aliquot), with all original TSV columns preserved verbatim. Notably
+# keeps `stranded_first` / `stranded_second` (the consolidated dataset
+# drops them per GDC's harmonization choice; the tabular dataset is closer
+# to the source and includes them).
+TABULAR_EXPRESSION_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    *_ALIQUOT_FKS,
+    pa.field("source_file_id", pa.string()),
+    pa.field("gene_id", pa.string()),
+    pa.field("gene_name", pa.string()),
+    pa.field("gene_type", pa.string()),
+    pa.field("unstranded", pa.int64()),
+    pa.field("stranded_first", pa.int64()),
+    pa.field("stranded_second", pa.int64()),
+    pa.field("tpm_unstranded", pa.float64()),
+    pa.field("fpkm_unstranded", pa.float64()),
+    pa.field("fpkm_uq_unstranded", pa.float64()),
+]
+
+# Files: provenance table from each project's modality manifest.json.
+# One row per (file_id, case_id) — most files are 1:1 with cases for these
+# modalities, but a file can in principle reference multiple cases.
+TABULAR_FILES_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    pa.field("file_id", pa.string()),
+    pa.field("file_name", pa.string()),
+    pa.field("file_size", pa.int64()),
+    pa.field("md5sum", pa.string()),
+    pa.field("data_category", pa.string()),
+    pa.field("data_type", pa.string()),
+    pa.field("data_format", pa.string()),
+    pa.field("experimental_strategy", pa.string()),
+    pa.field("workflow_type", pa.string()),
+    pa.field("access", pa.string()),
+    # Local label naming the project subdir the file came from
+    # (`mutations` / `expression` / ...).
+    pa.field("modality", pa.string()),
+]
+
+
+# Map of table-name → schema, used by the build-tabular command and the
+# dataset card generator. Table names mirror the GDC's stable concepts:
+# `cases` (cases.json), `masked_somatic_mutation` and
+# `gene_expression_quantification` (snake_cased GDC `data_type` enum
+# values), `files` (per-modality manifests, derived from the GDC `/files`
+# endpoint).
+TABULAR_TABLES: dict[str, pa.Schema] = {
+    "cases": pa.schema(TABULAR_CASES_FIELDS),
+    "masked_somatic_mutation": pa.schema(TABULAR_MUTATIONS_FIELDS),
+    "gene_expression_quantification": pa.schema(TABULAR_EXPRESSION_FIELDS),
+    "files": pa.schema(TABULAR_FILES_FIELDS),
+}
