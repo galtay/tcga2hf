@@ -77,14 +77,19 @@ patients = [TcgaHfPatient.model_validate(r) for r in t.to_pylist()]
 """
 
 
-def _render_gdc_requests(projects: list[str]) -> str:
+def _render_gdc_requests(projects: list[str], *, consolidated: bool) -> str:
     """Render a concise summary of the GDC requests this build issues.
 
     Templated from the live constants in `tcga2hf.clinical` and
     `tcga2hf.genomic` so the docs can't drift from the code. Full
     request payloads (the JSON `filters` + `fields` + `expand` blocks)
     live in those source files; this section only shows the headline
-    filters that distinguish each table.
+    filters and where each request's output ends up.
+
+    `consolidated=True` reframes the output mapping for the consolidated
+    patients dataset, where the same three endpoints' outputs end up
+    nested inside one parquet row per patient instead of in separate
+    flat tables.
     """
     project_md = ", ".join(f"`{p}`" for p in sorted(projects))
 
@@ -96,9 +101,19 @@ def _render_gdc_requests(projects: list[str]) -> str:
         "Masked Somatic Mutation": "masked_somatic_mutation",
         "Gene Expression Quantification": "gene_expression_quantification",
     }
+    label_col = "Lands at" if consolidated else "Table"
+    table_header = (
+        f"| {label_col} | data_type | data_format | data_category | "
+        "experimental_strategy | analysis.workflow_type |"
+    )
+    table_sep = "|---|---|---|---|---|---|"
     for dtype, extras in _MODALITY_FILTERS.items():
         table = table_for_data_type.get(dtype, dtype)
-        cols = [f"`{table}`", f"`{dtype}`"]
+        if consolidated:
+            label = f"`samples_{table}` array"
+        else:
+            label = f"`{table}`"
+        cols = [label, f"`{dtype}`"]
         for col_field in (
             "data_format",
             "data_category",
@@ -109,49 +124,74 @@ def _render_gdc_requests(projects: list[str]) -> str:
         modality_rows.append("| " + " | ".join(cols) + " |")
     modality_table = "\n".join(modality_rows)
 
+    if consolidated:
+        cases_dest = (
+            "feeds the case-level scalars + the nested `demographic`, "
+            "`diagnoses[]`, `follow_ups[]`, `exposures[]`, "
+            "`family_histories[]`, and `samples[]` columns of each "
+            "patient row"
+        )
+        files_dest = (
+            "Each row's molecular content lands in two top-level array "
+            "columns on the same patient row:"
+        )
+        post_data_dest = (
+            "Mutations files are parsed row-by-row into each patient's "
+            "`samples_masked_somatic_mutation` array; expression files "
+            "are parsed and projected into `samples_gene_expression_quantification`."
+        )
+    else:
+        cases_dest = "feeds the `cases` config"
+        files_dest = (
+            "Each modality maps to its own config in this dataset, with "
+            "the combined `/files` responses also feeding the `files` "
+            "config:"
+        )
+        post_data_dest = (
+            "Mutations files are parsed row-by-row into the "
+            "`masked_somatic_mutation` config; expression files are "
+            "parsed gene-row-by-gene-row into the "
+            "`gene_expression_quantification` config."
+        )
+
     return f"""\
 ## How this dataset is built
 
 Three GDC REST endpoints feed every row, with filters and field lists
-constructed in [`src/tcga2hf/clinical.py`][src-clinical] (the `cases`
-table) and [`src/tcga2hf/genomic.py`][src-genomic] (molecular and
-provenance tables) of the [`tcga2hf` repo][repo].
+constructed in [`src/tcga2hf/clinical.py`][src-clinical] and
+[`src/tcga2hf/genomic.py`][src-genomic] of the [`tcga2hf` repo][repo].
 
 **Projects fetched in this build:** {project_md}.
 
-### `POST /cases` → `cases` table
+### `POST /cases`
 
 Filter: `project.project_id IN [<projects above>]`. The request `expand`s
 the full nested `case` structure (demographic + diagnoses → treatments +
 follow_ups + exposures + family_histories + samples → portions →
-analytes → aliquots), and the response is captured verbatim into
-`<data-dir>/raw/<project>/cases.json` per project. See
+analytes → aliquots). The response is captured verbatim into
+`<data-dir>/raw/<project>/cases.json` per project and {cases_dest}. See
 `tcga2hf.clinical.TOP_LEVEL_FIELDS` and `tcga2hf.clinical.EXPANSIONS`
 for the exact field/expand lists.
 
-### `POST /files` → `masked_somatic_mutation`, `gene_expression_quantification`, `files` tables
+### `POST /files`
 
 One POST per (project, modality). All requests share
 `cases.project.project_id = <project>` AND `access = open`. The
 remaining clauses lock the format / experimental strategy / workflow
 type so future GDC additions can't silently ship a different pipeline
-under the same `data_type`:
+under the same `data_type`. {files_dest}
 
-| Table | data_type | data_format | data_category | experimental_strategy | analysis.workflow_type |
-|---|---|---|---|---|---|
+{table_header}
+{table_sep}
 {modality_table}
 
-The combined `/files` responses (one per modality per project) feed the
-`files` table. See `tcga2hf.genomic.MODALITY_FILTERS` and
-`tcga2hf.genomic.FILE_FIELDS` for the full request payload.
+See `tcga2hf.genomic.MODALITY_FILTERS` and `tcga2hf.genomic.FILE_FIELDS`
+for the full request payload.
 
 ### `POST /data` → file bytes
 
 UUIDs returned by `/files` are batched (≤50 per request) into `POST
-/data`; the response is a tar.gz of those files. Mutations files are
-parsed row-by-row into the `masked_somatic_mutation` config; expression
-files are parsed gene-row-by-gene-row into the
-`gene_expression_quantification` config. See
+/data`; the response is a tar.gz of those files. {post_data_dest} See
 `tcga2hf.gdc.bulk_download` for the batching and retry logic.
 
 ### Provenance pinned per build
@@ -229,8 +269,10 @@ Policy references:
 
 ## Disclaimer
 
-Prototype dataset. Schema, included projects, and column coverage are still
-evolving. Re-derive from the GDC for any analysis where freshness matters.
+Re-derive from the GDC for any analysis where freshness matters; the
+dataset reflects the GDC release pinned in each project's
+`gdc_status.json`. The pipeline that builds this dataset is on GitHub at
+[`galtay/tcga2hf`][repo].
 """
 
 
@@ -314,7 +356,7 @@ National Cancer Institute (NCI) Genomic Data Commons (GDC). One HuggingFace
         [
             header,
             _DATA_MODEL,
-            _render_gdc_requests(projects),
+            _render_gdc_requests(projects, consolidated=True),
             _LOADING,
             _GDC_REFERENCES,
             _LICENSE_AND_REDISTRIBUTION,
@@ -537,7 +579,7 @@ table). Companion to the consolidated nested-patient dataset
         [
             header,
             _TABULAR_DATA_MODEL,
-            _render_gdc_requests(projects),
+            _render_gdc_requests(projects, consolidated=False),
             _TABULAR_LOADING,
             _GDC_REFERENCES,
             _LICENSE_AND_REDISTRIBUTION,
