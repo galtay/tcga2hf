@@ -104,24 +104,45 @@ def fetch_files(
     extra_filters: list[dict[str, Any]] | None = None,
     skip_existing: bool = True,
     batch_size: int = 50,
+    max_files: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Download every hit's bytes to <out_dir>/<file_name> and write manifest.json.
+    """Download hits' bytes to <out_dir>/<file_name> and write manifest.json.
 
-    Returns the manifest list. Existing files (matching size) are skipped unless
-    skip_existing=False. Downloads are batched via POST /data (`batch_size` per
-    request) so wall time scales with total bytes rather than per-file latency.
+    Returns the manifest list. Existing files (matching size) are skipped
+    unless skip_existing=False. Downloads are batched via POST /data
+    (`batch_size` per request) so wall time scales with total bytes rather
+    than per-file latency.
+
+    `max_files` caps the *total* number of files we'll have on disk after
+    this call (cached + freshly downloaded). Set to 0 to discover and
+    write the full manifest without downloading any new bytes — useful for
+    populating the `files` table across projects where you only want a
+    sampler of the actual molecular content. The manifest always lists
+    every hit returned by `/files`, regardless of how many were
+    downloaded; entries trimmed off by `max_files` are tagged
+    `_status="manifest_only"`.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     hits = list_open_files(client, project_id, data_type, extra_filters)
 
     cached_ids: set[str] = set()
-    to_download_ids: list[str] = []
+    eligible_for_download: list[str] = []
     for hit in hits:
         target = out_dir / hit["file_name"]
         if skip_existing and target.exists() and target.stat().st_size == hit.get("file_size"):
             cached_ids.add(hit["file_id"])
         else:
-            to_download_ids.append(hit["file_id"])
+            eligible_for_download.append(hit["file_id"])
+
+    if max_files is None:
+        to_download_ids = eligible_for_download
+    else:
+        # `max_files` is a target *total* count on disk, so subtract what's
+        # already cached. If we already have ≥ max_files cached, download
+        # nothing new.
+        budget = max(0, max_files - len(cached_ids))
+        to_download_ids = eligible_for_download[:budget]
+    skipped_ids = set(eligible_for_download) - set(to_download_ids)
 
     if len(to_download_ids) >= 2:
         client.bulk_download(to_download_ids, out_dir, batch_size=batch_size)
@@ -135,6 +156,12 @@ def fetch_files(
         # manifest so downstream consumers see a single `workflow_type`
         # column matching the dataset's `files` schema.
         analysis = hit.get("analysis") or {}
+        if hit["file_id"] in cached_ids:
+            status = "cached"
+        elif hit["file_id"] in skipped_ids:
+            status = "manifest_only"
+        else:
+            status = "downloaded"
         manifest.append(
             {
                 "file_id": hit["file_id"],
@@ -148,7 +175,7 @@ def fetch_files(
                 "workflow_type": analysis.get("workflow_type"),
                 "access": hit.get("access"),
                 "cases": hit.get("cases", []),
-                "_status": "cached" if hit["file_id"] in cached_ids else "downloaded",
+                "_status": status,
             }
         )
 

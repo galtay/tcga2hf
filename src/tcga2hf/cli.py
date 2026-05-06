@@ -111,6 +111,7 @@ def _fetch_modality(
     data_dir: Path | None,
     data_type: str,
     modality_dir: str,
+    max_files: int | None = None,
 ) -> None:
     """Shared body for fetch-mutations / fetch-expression / future modalities."""
     root = _resolve_data_dir(data_dir)
@@ -123,15 +124,30 @@ def _fetch_modality(
         for proj in project:
             out_dir = raw_dir / proj / modality_dir
             typer.echo(f"fetching {data_type!r} for {proj} -> {out_dir}")
-            manifest = genomic.fetch_files(client, proj, data_type, out_dir)
+            manifest = genomic.fetch_files(client, proj, data_type, out_dir, max_files=max_files)
             n_dl = sum(1 for m in manifest if m["_status"] == "downloaded")
             n_cache = sum(1 for m in manifest if m["_status"] == "cached")
+            n_skip = sum(1 for m in manifest if m["_status"] == "manifest_only")
             total_mb = sum((m.get("file_size") or 0) for m in manifest) / 1e6
+            extra = f", {n_skip} manifest-only" if n_skip else ""
             typer.echo(
-                f"  {len(manifest):>4} files ({n_dl} downloaded, {n_cache} cached), "
-                f"{total_mb:.1f} MB total"
+                f"  {len(manifest):>4} files ({n_dl} downloaded, {n_cache} cached{extra}), "
+                f"{total_mb:.1f} MB total in manifest"
             )
             (raw_dir / proj / "gdc_status.json").write_text(json.dumps(status, indent=2))
+
+
+MaxFilesOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--max-files",
+        help=(
+            "Cap on total files on disk (cached + new) per project. Set to 1 to "
+            "sample one file per project, or 0 to populate the manifest without "
+            "downloading any new bytes. Manifest always lists every discovered file."
+        ),
+    ),
+]
 
 
 @app.command("fetch-mutations")
@@ -144,9 +160,10 @@ def fetch_mutations_cmd(
         ),
     ],
     data_dir: DataDirOpt = None,
+    max_files: MaxFilesOpt = None,
 ) -> None:
     """Download open-access Masked Somatic Mutation MAF files (DNA)."""
-    _fetch_modality(project, data_dir, "Masked Somatic Mutation", "mutations")
+    _fetch_modality(project, data_dir, "Masked Somatic Mutation", "mutations", max_files=max_files)
 
 
 @app.command("fetch-expression")
@@ -159,9 +176,12 @@ def fetch_expression_cmd(
         ),
     ],
     data_dir: DataDirOpt = None,
+    max_files: MaxFilesOpt = None,
 ) -> None:
     """Download open-access Gene Expression Quantification TSVs (RNA-Seq, STAR counts)."""
-    _fetch_modality(project, data_dir, "Gene Expression Quantification", "expression")
+    _fetch_modality(
+        project, data_dir, "Gene Expression Quantification", "expression", max_files=max_files
+    )
 
 
 @app.command("build")

@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from tcga2hf.clinical import EXPANSIONS as _CLINICAL_EXPAND
-from tcga2hf.clinical import TOP_LEVEL_FIELDS as _CASE_FIELDS_REQUESTED
-from tcga2hf.genomic import FILE_FIELDS as _FILE_FIELDS_REQUESTED
 from tcga2hf.genomic import MODALITY_FILTERS as _MODALITY_FILTERS
 
 # ---------------------------------------------------------------------------
@@ -83,136 +78,92 @@ patients = [TcgaHfPatient.model_validate(r) for r in t.to_pylist()]
 
 
 def _render_gdc_requests(projects: list[str]) -> str:
-    """Render the exact GDC requests this build issues, populated from the
-    real constants in `tcga2hf.clinical` and `tcga2hf.genomic` so the docs
-    can't drift from the code. Templated per dataset build with the project
-    list it was actually fetched for.
+    """Render a concise summary of the GDC requests this build issues.
+
+    Templated from the live constants in `tcga2hf.clinical` and
+    `tcga2hf.genomic` so the docs can't drift from the code. Full
+    request payloads (the JSON `filters` + `fields` + `expand` blocks)
+    live in those source files; this section only shows the headline
+    filters that distinguish each table.
     """
-    project_list = sorted(projects)
+    project_md = ", ".join(f"`{p}`" for p in sorted(projects))
 
-    # /cases payload — the one the clinical fetcher posts. Keys mirror the
-    # GDC REST shape: filters + fields + expand + size + from + format.
-    cases_payload = {
-        "filters": {
-            "op": "in",
-            "content": {
-                "field": "project.project_id",
-                "value": project_list,
-            },
-        },
-        "fields": ",".join(_CASE_FIELDS_REQUESTED),
-        "expand": ",".join(_CLINICAL_EXPAND),
-        "format": "JSON",
-        "size": 200,
-        "from": 0,
-    }
-    cases_json = json.dumps(cases_payload, indent=2)
-
-    # /files payload — same shape but per (project, data_type) pair. Show
-    # one example with the LUAD-style filter; the actual builds run this
-    # once per project × per data_type. The clauses are templated from
-    # `MODALITY_FILTERS` so the example reflects whatever modality-locking
-    # filters the build is currently using.
-    example_project = project_list[-1] if project_list else "<PROJECT>"
-    example_data_type = "Masked Somatic Mutation"
-    files_clauses: list[dict[str, Any]] = [
-        {
-            "op": "=",
-            "content": {
-                "field": "cases.project.project_id",
-                "value": example_project,
-            },
-        },
-        {"op": "=", "content": {"field": "access", "value": "open"}},
-        {"op": "=", "content": {"field": "data_type", "value": example_data_type}},
-    ]
-    for field, value in _MODALITY_FILTERS.get(example_data_type, {}).items():
-        files_clauses.append({"op": "=", "content": {"field": field, "value": value}})
-    files_payload = {
-        "filters": {"op": "and", "content": files_clauses},
-        "fields": ",".join(_FILE_FIELDS_REQUESTED),
-        "format": "JSON",
-        "size": 500,
-        "from": 0,
-    }
-    files_json = json.dumps(files_payload, indent=2)
-
-    # Render the per-modality filter table as markdown rows so consumers
-    # see the full set of (data_type, additional clauses) without having
-    # to read the source.
+    # Per-modality clause table. One row per (table, modality filter set);
+    # populated from `genomic.MODALITY_FILTERS` so adding a modality
+    # automatically documents itself here.
     modality_rows: list[str] = []
+    table_for_data_type = {
+        "Masked Somatic Mutation": "masked_somatic_mutation",
+        "Gene Expression Quantification": "gene_expression_quantification",
+    }
     for dtype, extras in _MODALITY_FILTERS.items():
-        clauses = [f"`data_type={dtype!r}`"] + [f"`{k}={v!r}`" for k, v in extras.items()]
-        modality_rows.append(f"- {' AND '.join(clauses)}")
-    modalities_md = "\n".join(modality_rows)
+        table = table_for_data_type.get(dtype, dtype)
+        cols = [f"`{table}`", f"`{dtype}`"]
+        for col_field in (
+            "data_format",
+            "data_category",
+            "experimental_strategy",
+            "analysis.workflow_type",
+        ):
+            cols.append(f"`{extras.get(col_field, '')}`")
+        modality_rows.append("| " + " | ".join(cols) + " |")
+    modality_table = "\n".join(modality_rows)
 
     return f"""\
 ## How this dataset is built
 
-Three GDC REST endpoints feed every row in this dataset. Both endpoints
-and payloads below are reproduced verbatim from the build code; the
-on-disk `gdc_status.json` for each project additionally pins the GDC
-data release and dictionary SHA-256 the data was fetched against.
+Three GDC REST endpoints feed every row, with filters and field lists
+constructed in [`src/tcga2hf/clinical.py`][src-clinical] (the `cases`
+table) and [`src/tcga2hf/genomic.py`][src-genomic] (molecular and
+provenance tables) of the [`tcga2hf` repo][repo].
 
-### `POST /cases` — clinical entities
+**Projects fetched in this build:** {project_md}.
 
-One paginated POST per build, returning the nested case JSON for every
-patient in the requested projects.
+### `POST /cases` → `cases` table
 
-```json
-{cases_json}
-```
+Filter: `project.project_id IN [<projects above>]`. The request `expand`s
+the full nested `case` structure (demographic + diagnoses → treatments +
+follow_ups + exposures + family_histories + samples → portions →
+analytes → aliquots), and the response is captured verbatim into
+`<data-dir>/raw/<project>/cases.json` per project. See
+`tcga2hf.clinical.TOP_LEVEL_FIELDS` and `tcga2hf.clinical.EXPANSIONS`
+for the exact field/expand lists.
 
-The full nested response (top-level scalars + `demographic` + `diagnoses[]`
-with `treatments[]` inside + `follow_ups[]` + `exposures[]` +
-`family_histories[]` + `samples[]` with `portions[].analytes[].aliquots[]`
-inside) is written to `<data-dir>/raw/<project>/cases.json` and feeds the
-`cases` config (and the consolidated patient row).
+### `POST /files` → `masked_somatic_mutation`, `gene_expression_quantification`, `files` tables
 
-### `POST /files` — molecular file discovery
+One POST per (project, modality). All requests share
+`cases.project.project_id = <project>` AND `access = open`. The
+remaining clauses lock the format / experimental strategy / workflow
+type so future GDC additions can't silently ship a different pipeline
+under the same `data_type`:
 
-One POST per (project, modality) pair, listing every open-access file of
-that modality. Each modality is identified by a `data_type` plus a small
-set of clauses that lock the format / experimental strategy / workflow
-type so future GDC additions can't silently ship under the same
-`data_type`:
+| Table | data_type | data_format | data_category | experimental_strategy | analysis.workflow_type |
+|---|---|---|---|---|---|
+{modality_table}
 
-{modalities_md}
+The combined `/files` responses (one per modality per project) feed the
+`files` table. See `tcga2hf.genomic.MODALITY_FILTERS` and
+`tcga2hf.genomic.FILE_FIELDS` for the full request payload.
 
-Below is the full request shape for `Masked Somatic Mutation` against
-`{example_project}`; the build runs the same shape with the
-`Gene Expression Quantification` clauses too. Responses are written to
-`<data-dir>/raw/<project>/<modality>/manifest.json` and feed the `files`
-config.
+### `POST /data` → file bytes
 
-```json
-{files_json}
-```
+UUIDs returned by `/files` are batched (≤50 per request) into `POST
+/data`; the response is a tar.gz of those files. Mutations files are
+parsed row-by-row into the `masked_somatic_mutation` config; expression
+files are parsed gene-row-by-gene-row into the
+`gene_expression_quantification` config. See
+`tcga2hf.gdc.bulk_download` for the batching and retry logic.
 
-### `POST /data` — file bytes
+### Provenance pinned per build
 
-For every file UUID returned by `/files`, the build batches up to 50
-UUIDs per request:
+- `GET /status` → `data_release` / `tag` / `commit` saved in each
+  project's `gdc_status.json`.
+- `GET /v0/submission/_dictionary/_all` → schema dictionary snapshot
+  saved alongside the raw data; its SHA-256 is recorded in
+  `gdc_status.json`.
 
-```json
-{{"ids": ["<file_uuid_1>", "<file_uuid_2>", "..."]}}
-```
-
-The response is a tar.gz of the files. Mutations files are parsed
-row-by-row into the `masked_somatic_mutation` config; expression files
-are parsed gene-row-by-gene-row into the
-`gene_expression_quantification` config. (See `tcga2hf.gdc.bulk_download`
-for the batching + retry logic.)
-
-### Other GDC calls captured for provenance
-
-- `GET /status` — once at the top of every build; `data_release` /
-  `tag` / `commit` are saved in each project's `gdc_status.json`.
-- `GET /v0/submission/_dictionary/_all` — once at the top of every build;
-  written to `<data-dir>/raw/gdc_dictionary.<major>.<minor>.json` and its
-  SHA-256 is recorded in `gdc_status.json`. The static schema in
-  `tcga2hf.schema` is regenerated from this dictionary; see the package
-  `scripts/regenerate_clinical_fields.py`.
+[src-clinical]: https://github.com/galtay/tcga2hf/blob/main/src/tcga2hf/clinical.py
+[src-genomic]: https://github.com/galtay/tcga2hf/blob/main/src/tcga2hf/genomic.py
 """
 
 
@@ -406,10 +357,12 @@ case          one patient (TCGA-XX-1234)        ← cases row
             └── aliquot    a vial handed off for sequencing
 ```
 
-Each table is one HF
-**config** named after the table; each TCGA project is one **split**
-inside that config. (HF's `split` slot is arbitrary string-typed; we have
-no train/val/test semantics so we repurpose it to identify the project.)
+Each (project, table) pair is one HF **config** named
+`<project>_<table>` (e.g. `TCGA_LUAD_cases`,
+`TCGA_LUAD_masked_somatic_mutation`); each config has the canonical
+`train` split. We use a config per pair rather than splits-per-project
+within one config because HF Data Studio expects splits to be
+train / validation / test, and we have no such semantics.
 
 | Table | Grain | Source |
 |---|---|---|
@@ -445,11 +398,11 @@ human-readable `*_submitter_id` form (e.g. `case_submitter_id` =
 
 ```sql
 -- HF Data Studio's SQL console exposes each (config, split) pair as a
--- single table named `<config>_<split>` (lowercased). So
--- `masked_somatic_mutation` × `TCGA_LUAD` →
--- `masked_somatic_mutation_tcga_luad`.
+-- single table named `<config>_<split>` (lowercased). With config
+-- `TCGA_LUAD_masked_somatic_mutation` × split `train` →
+-- `tcga_luad_masked_somatic_mutation_train`.
 SELECT case_submitter_id, Hugo_Symbol, HGVSp_Short, t_alt_count, t_depth
-FROM masked_somatic_mutation_tcga_luad
+FROM tcga_luad_masked_somatic_mutation_train
 WHERE Hugo_Symbol = 'TP53' AND Variant_Classification != 'Silent'
 ORDER BY t_alt_count DESC
 LIMIT 50;
@@ -465,22 +418,24 @@ Want all the data nested per patient instead? See the consolidated
 _TABULAR_LOADING = """\
 ## Loading
 
-One config per table; the TCGA project is the split. Splits use
-underscores (`TCGA_LUAD`) since HF's dataset-server validator forbids
-dashes in split names; file paths on disk keep the canonical
-dash-separated GDC project_id (`TCGA-LUAD/`).
+One config per (project, table). Config names use underscores
+throughout (e.g. `TCGA_LUAD_masked_somatic_mutation`); each config has
+a single conventional `train` split. File paths on disk keep the
+canonical dash-separated GDC project_id (`TCGA-LUAD/...`).
 
 ### `datasets`
 
 ```python
 from datasets import load_dataset
 
-# Just LUAD's cases table (one row per patient, nested entities preserved):
-luad_cases = load_dataset("gabrielaltay/tcga-tabular-open", "cases", split="TCGA_LUAD")
-
-# All projects' mutations (concatenated across splits):
-all_muts = load_dataset(
-    "gabrielaltay/tcga-tabular-open", "masked_somatic_mutation", split="all"
+# LUAD cases (one row per patient, nested entities preserved):
+luad_cases = load_dataset(
+    "gabrielaltay/tcga-tabular-open", "TCGA_LUAD_cases", split="train"
+)
+luad_muts = load_dataset(
+    "gabrielaltay/tcga-tabular-open",
+    "TCGA_LUAD_masked_somatic_mutation",
+    split="train",
 )
 ```
 
@@ -511,26 +466,26 @@ DuckDB picks up `HF_TOKEN` from the env automatically once it's public.
 
 
 def _tabular_configs_yaml(projects: list[str], tables: list[str]) -> str:
-    """One config per table; one split per project inside each config.
+    """One config per (project, table); one canonical `train` split each.
 
-    HF `split` is just an arbitrary string label — we have no train/val/test
-    semantics, so the slot is repurposed to identify the TCGA project. This
-    collapses the cross-product (#projects × #tables configs) down to one
-    config per table with the project list folded into splits, and matches
-    the actual data shape: each project/table combo carries the same schema.
+    HF Data Studio expects splits to be train / validation / test (its
+    dataset-server warns when a config has more than three). We don't have
+    train/val/test slices, so we model each (project, table) pair as its
+    own config and leave the split slot at the conventional `train`.
 
-    HF's dataset-server validator rejects dashes in split names, so the
-    GDC `project_id` (e.g. `TCGA-CHOL`) is normalized to `TCGA_CHOL` for
-    the split slot only — file paths on disk keep the canonical
-    dash-separated GDC name.
+    Config names are `<project>_<table>` with dashes in the project_id
+    normalized to underscores (e.g. `TCGA_CHOL_cases`) so the config name
+    is a valid identifier in HF Data Studio's SQL console without further
+    sanitization. File paths on disk keep the canonical dash form
+    (`TCGA-CHOL/cases/data.parquet`).
     """
     lines = ["configs:"]
-    for table in tables:
-        lines.append(f"  - config_name: {table}")
-        lines.append("    data_files:")
-        for project in sorted(projects):
-            split = project.replace("-", "_")
-            lines.append(f"      - split: {split}")
+    for project in sorted(projects):
+        config_proj = project.replace("-", "_")
+        for table in tables:
+            lines.append(f"  - config_name: {config_proj}_{table}")
+            lines.append("    data_files:")
+            lines.append("      - split: train")
             lines.append(f"        path: {project}/{table}/data.parquet")
     return "\n".join(lines)
 
