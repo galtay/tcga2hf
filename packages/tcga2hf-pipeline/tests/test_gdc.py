@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tcga2hf.gdc import GDCClient, and_, eq, in_
+from tcga2hf_pipeline.gdc import GDCClient, and_, eq, in_
 
 
 def test_filter_helpers() -> None:
@@ -150,8 +150,8 @@ def test_cases_smoke() -> None:
 @pytest.mark.network
 def test_bulk_download_smoke(tmp_path: Path) -> None:
     """Live GDC bulk download: pull a few open-access files and check they land."""
-    from tcga2hf.gdc import and_ as _and
-    from tcga2hf.gdc import eq as _eq
+    from tcga2hf_pipeline.gdc import and_ as _and
+    from tcga2hf_pipeline.gdc import eq as _eq
 
     with GDCClient() as c:
         hits = c.files(

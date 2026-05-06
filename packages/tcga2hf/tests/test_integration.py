@@ -28,7 +28,7 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not (PROCESSED / "TCGA-CHOL/data.parquet").exists(),
-        reason="run `tcga2hf build` first to populate $HOME/data/tcga2hf/processed",
+        reason="run `tcga2hf-pipeline build` first to populate $HOME/data/tcga2hf/processed",
     ),
 ]
 

@@ -17,7 +17,7 @@ def upload_dataset(
 
     The directory should contain README.md (with `configs:` YAML frontmatter)
     and patients/<PROJECT>.parquet files — i.e. the exact tree produced by
-    `tcga2hf build`.
+    `tcga2hf-pipeline build`.
 
     `delete_patterns` lets the upload remove existing files in the remote
     repo that match a glob (e.g. `["*/train.parquet"]` when migrating away
@@ -28,9 +28,9 @@ def upload_dataset(
     first. Returns the URL of the dataset on success.
     """
     if not processed_dir.exists():
-        raise FileNotFoundError(f"{processed_dir} does not exist. Run `tcga2hf build` first.")
+        raise FileNotFoundError(f"{processed_dir} does not exist. Run `tcga2hf-pipeline build` first.")
     if not (processed_dir / "README.md").exists():
-        raise FileNotFoundError(f"{processed_dir}/README.md missing. Re-run `tcga2hf build`.")
+        raise FileNotFoundError(f"{processed_dir}/README.md missing. Re-run `tcga2hf-pipeline build`.")
 
     api = HfApi(token=token)
     api.create_repo(

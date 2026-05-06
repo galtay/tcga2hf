@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from tcga2hf import mutations
 from tcga2hf.schema import _MAF_COLUMNS, MUTATION_FIELDS
+from tcga2hf_pipeline import mutations
 
 
 def _build_mini_maf_tarball(tmp_path: Path) -> Path:

@@ -31,10 +31,10 @@ from typing import Any
 
 import pandas as pd
 
-from tcga2hf import clinical as _clinical_mod
-from tcga2hf import expression as _expression_mod
-from tcga2hf import mutations as _mutations_mod
 from tcga2hf.schema import TABULAR_CASES_FIELDS, TABULAR_TABLES
+from tcga2hf_pipeline import clinical as _clinical_mod
+from tcga2hf_pipeline import expression as _expression_mod
+from tcga2hf_pipeline import mutations as _mutations_mod
 
 # Names of `cases` table columns, used to re-shape patient rows. Excludes
 # the two molecular-vector columns that the consolidated row carries (they

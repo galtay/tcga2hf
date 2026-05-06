@@ -1,113 +1,47 @@
 # tcga2hf
 
-Download public, open-access data from The Cancer Genome Atlas (TCGA) from the
-National Cancer Institute (NCI) Genomic Data Commons (GDC) and stage it as
-HuggingFace (HF) Hub datasets.
+Two complementary Python packages for the public
+[`gabrielaltay/tcga-patients-open`][patients] and
+[`gabrielaltay/tcga-tabular-open`][tabular] HuggingFace datasets. Same
+source data — open-access TCGA from the NCI Genomic Data Commons (GDC) —
+served two ways:
 
-Two published datasets, both public:
+- **`packages/tcga2hf/`** — the **read-side** package
+  ([README](packages/tcga2hf/README.md)). Typed pydantic models +
+  pyarrow schemas. Tiny dep set (just `pydantic` + `pyarrow`).
+  `from tcga2hf import TcgaHfPatient` and you're done. Targeted at users
+  who consume the published HF datasets.
+- **`packages/tcga2hf-pipeline/`** — the **build-side** package
+  ([README](packages/tcga2hf-pipeline/README.md)). The
+  `tcga2hf-pipeline` CLI: fetches from GDC, flattens to Parquet,
+  generates dataset cards, pushes to HF Hub. Heavier deps (httpx, pandas,
+  tenacity, typer, huggingface-hub). Depends on `tcga2hf` for shared
+  schemas. Targeted at maintainers / re-derivers.
 
-- [`gabrielaltay/tcga-patients-open`][patients] — **consolidated**: one row
-  per patient with the GDC `case` entity tree fully nested (demographic,
-  diagnoses → treatments, follow_ups, exposures, family_histories, samples →
-  portions → analytes → aliquots) plus molecular vectors. One config per
-  TCGA project.
-- [`gabrielaltay/tcga-tabular-open`][tabular] — **tabular**: same source
-  data reshaped into four flat tables per project (`cases`,
-  `masked_somatic_mutation`, `gene_expression_quantification`, `files`)
-  for SQL-style exploration. One config per (project, table) pair.
+## Develop
 
-## Install
+This is a [uv](https://docs.astral.sh/uv/) workspace; one `uv sync` at
+the repo root brings up both packages and dev tooling:
 
 ```bash
 uv sync
+uv run pytest -m "not network"     # unit + integration tests
+uv run tcga2hf-pipeline --help     # the build CLI
 ```
 
-## Auth
+## Datasets
 
-Only the `tcga2hf upload` and `tcga2hf upload-tabular` commands need auth.
-Put a write-scoped HF token (from https://huggingface.co/settings/tokens)
-into a local `.env` file in the project root — gitignored, auto-loaded by
-the CLI:
-
-```
-HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx
-```
-
-The CLI calls `load_dotenv(override=True)` so this project's `.env` always
-wins over any inherited shell `HF_TOKEN`.
-
-## Data location
-
-All data lives outside the repo, under `$TCGA2HF_DATA_DIR` (default
-`$HOME/data/tcga2hf`), overridable per command via `--data-dir`. The
-GDC fetch step is open-access and needs no auth.
-
-## Commands
-
-These hit the GDC for open-access data. Acronyms used below: MAF =
-Mutation Annotation Format; WXS = Whole Exome Sequencing.
-
-```
-tcga2hf fetch-clinical     # GDC -> raw cases.json per project
-tcga2hf fetch-mutations    # GDC -> Masked Somatic Mutation MAFs from WXS (DNA)
-tcga2hf fetch-expression   # GDC -> Gene Expression Quantification TSVs from RNA-Seq (STAR counts)
-tcga2hf build              # raw -> consolidated per-project parquets + dataset card
-tcga2hf build-tabular      # raw -> per-(project, table) parquets + dataset card
-tcga2hf upload             # push processed/ to the consolidated HF dataset repo
-tcga2hf upload-tabular     # push processed_tabular/ to the tabular HF dataset repo
-```
-
-`tcga2hf <cmd> --help` for arguments. Notable flags:
-
-- `--project TCGA-LUAD` (repeatable) on every fetch command, plus on
-  `build-tabular`. Omit on the build commands to process every project
-  under `<data-dir>/raw/`.
-- `--max-files N` on `fetch-mutations` / `fetch-expression`: cap the
-  total number of files on disk per project (cached + freshly downloaded).
-  Set to 1 to sample one file per project, or 0 to populate the manifest
-  without downloading any new bytes. Manifest always lists every
-  discovered file; entries trimmed off get `_status="manifest_only"`.
-
-## Pydantic reference implementation
-
-`src/tcga2hf/models.py` ships a fully-typed `TcgaHfPatient` pydantic model
-that mirrors the consolidated parquet schema and adds convenience joins
-for the common operations: `aliquot_to_sample`, `tumor_normal_pairs`,
-`mutations_by_gene`, `expression_for_gene`, `timeline`, etc. Slow but
-explicit — intended as a reference for what the data means and a spec
-other implementations (polars / pyarrow / SQL) can be benchmarked against.
-
-```python
-import pyarrow.parquet as pq
-from tcga2hf.models import TcgaHfPatient
-
-t = pq.read_table("~/data/tcga2hf/processed/TCGA-CHOL/data.parquet")
-for row in t.to_pylist():
-    patient = TcgaHfPatient.model_validate(row)
-    for tumor, normal in patient.tumor_normal_pairs():
-        print(tumor.submitter_id, "vs", normal.submitter_id)
-    for variant in patient.mutations_by_gene().get("TP53", []):
-        print(variant.HGVSp_Short, variant.t_alt_count, "/", variant.t_depth)
-    for event in patient.timeline():
-        print(f"day {event.day:+.0f}: {event.category} — {event.label}")
-```
-
-## Tests
-
-```bash
-uv run pytest                   # all, incl. live API smoke
-uv run pytest -m "not network"  # offline only
-```
-
-## Data model & redistribution
-
-We follow the GDC data model closely. Each dataset's card — generated by
-`tcga2hf build` / `build-tabular` and published with the dataset — is the
-single source for the biospecimen hierarchy, the few top-level
+Both datasets are public on HF Hub. Each carries its own dataset card,
+generated by `tcga2hf-pipeline build` / `build-tabular`, with the
+biospecimen hierarchy, GDC request payloads, the few top-level
 conveniences this project adds on top of the GDC `case` tree, and the
-redistribution / citation terms. Read either rendered on HF
-([patients][patients] · [tabular][tabular]) or from the Python source at
-[`src/tcga2hf/dataset_card.py`](src/tcga2hf/dataset_card.py).
+redistribution / citation terms.
+
+- [`gabrielaltay/tcga-patients-open`][patients] — consolidated, one row
+  per patient with the GDC entity tree fully nested + molecular vectors.
+- [`gabrielaltay/tcga-tabular-open`][tabular] — same source data
+  reshaped into four flat tables per project (`cases`,
+  `masked_somatic_mutation`, `gene_expression_quantification`, `files`).
 
 [patients]: https://huggingface.co/datasets/gabrielaltay/tcga-patients-open
 [tabular]: https://huggingface.co/datasets/gabrielaltay/tcga-tabular-open

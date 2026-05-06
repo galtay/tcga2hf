@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tcga2hf.gdc import GDCClient, and_, eq
+from tcga2hf_pipeline.gdc import GDCClient, and_, eq
 
 # Fields we request on each /files hit. The GDC `/files` endpoint
 # *replaces* the default response with whatever you list here (it does

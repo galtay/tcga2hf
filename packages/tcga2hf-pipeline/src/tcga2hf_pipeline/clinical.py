@@ -7,7 +7,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from tcga2hf.gdc import GDCClient, in_
+from tcga2hf_pipeline.gdc import GDCClient, in_
 from tcga2hf.schema import (
     ALIQUOT_FIELDS,
     ANALYTE_FIELDS,

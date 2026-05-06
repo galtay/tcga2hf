@@ -34,7 +34,7 @@ from tcga2hf.models import (
 PROCESSED = Path.home() / "data/tcga2hf/processed"
 LIVE_REQUIRED = pytest.mark.skipif(
     not (PROCESSED / "TCGA-CHOL/data.parquet").exists(),
-    reason="run `tcga2hf build` first to populate $HOME/data/tcga2hf/processed",
+    reason="run `tcga2hf-pipeline build` first to populate $HOME/data/tcga2hf/processed",
 )
 
 

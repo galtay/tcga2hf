@@ -9,7 +9,8 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 
-from tcga2hf import (
+from tcga2hf.schema import TABULAR_TABLES
+from tcga2hf_pipeline import (
     clinical,
     dataset_card,
     expression,
@@ -18,8 +19,7 @@ from tcga2hf import (
     mutations,
     tabular,
 )
-from tcga2hf.gdc import GDCClient, write_cases_json
-from tcga2hf.schema import TABULAR_TABLES
+from tcga2hf_pipeline.gdc import GDCClient, write_cases_json
 
 # Load .env from cwd (or any parent) on import. override=True so the project's
 # .env wins over any inherited shell variable: the HF_TOKEN here is scoped to

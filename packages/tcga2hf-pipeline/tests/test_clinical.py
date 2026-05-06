@@ -6,7 +6,6 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from tcga2hf import clinical, dataset_card
 from tcga2hf.schema import (
     ALIQUOT_FIELDS,
     ANALYTE_FIELDS,
@@ -20,6 +19,7 @@ from tcga2hf.schema import (
     SAMPLE_FIELDS,
     TREATMENT_FIELDS,
 )
+from tcga2hf_pipeline import clinical, dataset_card
 
 FIXTURE = Path(__file__).parent / "fixtures" / "case_chol_one.json"
 

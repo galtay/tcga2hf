@@ -721,8 +721,8 @@ PATIENTS = pa.schema(PATIENT_FIELDS)
 # also pair every UUID FK with its `*_submitter_id` so HF Data Studio rows
 # show human-readable values without needing extra joins.
 #
-# Built by `tcga2hf build-tabular` and published to a separate HF dataset
-# (`gabrielaltay/tcga-tabular-open`).
+# Built by `tcga2hf-pipeline build-tabular` and published to a separate
+# HF dataset (`gabrielaltay/tcga-tabular-open`).
 # ---------------------------------------------------------------------------
 
 

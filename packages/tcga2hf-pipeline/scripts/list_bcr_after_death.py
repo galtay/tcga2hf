@@ -7,8 +7,8 @@ Usage:
     uv run python scripts/list_bcr_after_death.py --data-dir /some/other/path
     uv run python scripts/list_bcr_after_death.py --project TCGA-CHOL
 
-Reads `<data-dir>/processed/<PROJECT>/train.parquet` for each TCGA-* project
-present, so run `tcga2hf build` first.
+Reads `<data-dir>/processed/<PROJECT>/data.parquet` for each TCGA-* project
+present, so run `tcga2hf-pipeline build` first.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ GDC_PORTAL_CASE = "https://portal.gdc.cancer.gov/cases"
 
 
 def list_for_project(project_dir: Path) -> list[dict]:
-    rows = pq.read_table(project_dir / "train.parquet").to_pylist()
+    rows = pq.read_table(project_dir / "data.parquet").to_pylist()
     out = []
     for r in rows:
         demo = r.get("demographic") or {}

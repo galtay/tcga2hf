@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tcga2hf import expression
 from tcga2hf.schema import EXPRESSION_FIELDS
+from tcga2hf_pipeline import expression
 
 
 def _build_synthetic_expression_project(tmp_path: Path) -> Path:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tcga2hf.genomic import MODALITY_FILTERS as _MODALITY_FILTERS
+from tcga2hf_pipeline.genomic import MODALITY_FILTERS as _MODALITY_FILTERS
 
 # ---------------------------------------------------------------------------
 # Static body sections. Single source of truth for content that's also
