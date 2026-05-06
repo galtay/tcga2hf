@@ -442,24 +442,19 @@ luad_muts = load_dataset(
 ### DuckDB (remote, via `hf://`)
 
 DuckDB can query the parquets in this repo directly without `datasets`,
-using the [`hf://` URL scheme][duckdb-hf]. Row groups + page indexes
-mean column-projection + filter pushdown skip most of the data on
-selective queries.
+using the [`hf://` URL scheme][duckdb-hf]. The dataset is public, so no
+auth is required. Row groups + page indexes let column-projection +
+filter pushdown skip most of the data on selective queries.
 
 ```python
-import duckdb, os
-con = duckdb.connect()
-con.execute(f"CREATE SECRET hf (TYPE huggingface, TOKEN '{os.environ['HF_TOKEN']}')")
-con.sql('''
+import duckdb
+duckdb.sql('''
     SELECT case_submitter_id, Hugo_Symbol, HGVSp_Short, t_alt_count, t_depth
     FROM "hf://datasets/gabrielaltay/tcga-tabular-open/TCGA-LUAD/masked_somatic_mutation/data.parquet"
     WHERE Hugo_Symbol = 'TP53' AND Variant_Classification != 'Silent'
     ORDER BY t_alt_count DESC LIMIT 10
 ''').show()
 ```
-
-The `CREATE SECRET` step is only needed while the dataset is private —
-DuckDB picks up `HF_TOKEN` from the env automatically once it's public.
 
 [duckdb-hf]: https://huggingface.co/docs/hub/datasets-duckdb-sql
 """
