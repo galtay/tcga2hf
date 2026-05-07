@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from tcga2hf.schema import _MAF_COLUMNS, MUTATION_FIELDS
 from tcga2hf_pipeline import mutations
 

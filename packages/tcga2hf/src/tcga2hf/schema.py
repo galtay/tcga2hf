@@ -707,6 +707,38 @@ PATIENT_FIELDS: list[pa.Field] = [
         "samples_gene_expression_quantification",
         pa.list_(pa.struct(EXPRESSION_FIELDS)),
     ),
+    # Curated survival endpoints from Liu et al., Cell 2018 (TCGA Pan-Cancer
+    # Clinical Data Resource — CDR). Sourced from the GDC's PanCanAtlas
+    # auxiliary file (UUID 1b5f413e-a8d1-4d10-92eb-7c4ae739ed81); locked to
+    # Liu et al's 2018 data freeze, so cases added to the GDC since then
+    # are unmatched and have null cdr_* values. `cdr_matched` is the audit
+    # flag. Column names track Liu's verbatim — `cdr_OS` is the OS event
+    # (0/1), `cdr_OS_time` is the time in days from index, etc.
+    pa.field("cdr_matched", pa.bool_()),
+    pa.field("cdr_redaction", pa.string()),
+    pa.field("cdr_OS", pa.int64()),
+    pa.field("cdr_OS_time", pa.float64()),
+    pa.field("cdr_DSS", pa.int64()),
+    pa.field("cdr_DSS_time", pa.float64()),
+    pa.field("cdr_DFI", pa.int64()),
+    pa.field("cdr_DFI_time", pa.float64()),
+    pa.field("cdr_PFI", pa.int64()),
+    pa.field("cdr_PFI_time", pa.float64()),
+    pa.field("cdr_survival_complete", pa.bool_()),
+    # Same survival endpoints, re-derived from the current GDC data using
+    # Liu et al's documented algorithms (see TCGA-CDR_Notes sheet in the
+    # source workbook). Full coverage — populated for every patient,
+    # including the post-2018-freeze cases CDR can't reach.
+    # `*_event` is 0/1, `*_time` is days from `index_date`. DFI is null
+    # for SKCM / THYM / UVM (Liu specifies no DFI for these tumor types).
+    pa.field("os_event", pa.int64()),
+    pa.field("os_time", pa.float64()),
+    pa.field("dss_event", pa.int64()),
+    pa.field("dss_time", pa.float64()),
+    pa.field("dfi_event", pa.int64()),
+    pa.field("dfi_time", pa.float64()),
+    pa.field("pfi_event", pa.int64()),
+    pa.field("pfi_time", pa.float64()),
 ]
 
 PATIENTS = pa.schema(PATIENT_FIELDS)

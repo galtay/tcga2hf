@@ -28,9 +28,13 @@ def upload_dataset(
     first. Returns the URL of the dataset on success.
     """
     if not processed_dir.exists():
-        raise FileNotFoundError(f"{processed_dir} does not exist. Run `tcga2hf-pipeline build` first.")
+        raise FileNotFoundError(
+            f"{processed_dir} does not exist. Run `tcga2hf-pipeline build` first."
+        )
     if not (processed_dir / "README.md").exists():
-        raise FileNotFoundError(f"{processed_dir}/README.md missing. Re-run `tcga2hf-pipeline build`.")
+        raise FileNotFoundError(
+            f"{processed_dir}/README.md missing. Re-run `tcga2hf-pipeline build`."
+        )
 
     api = HfApi(token=token)
     api.create_repo(

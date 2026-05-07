@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
-
 from tcga2hf.models import TcgaHfPatient
 
 PROCESSED = Path.home() / "data/tcga2hf/processed"

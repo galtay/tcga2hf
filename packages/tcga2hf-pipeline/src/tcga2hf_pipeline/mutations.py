@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
 from tcga2hf.schema import _MAF_COLUMNS, _MAF_FLOAT_COLS, _MAF_INT_COLS, MUTATION_FIELDS
 
 _FK_NAMES = {f.name for f in MUTATION_FIELDS} - set(_MAF_COLUMNS)

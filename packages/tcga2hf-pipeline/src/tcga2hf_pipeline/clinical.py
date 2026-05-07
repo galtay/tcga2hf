@@ -6,8 +6,6 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-
-from tcga2hf_pipeline.gdc import GDCClient, in_
 from tcga2hf.schema import (
     ALIQUOT_FIELDS,
     ANALYTE_FIELDS,
@@ -21,6 +19,8 @@ from tcga2hf.schema import (
     SAMPLE_FIELDS,
     TREATMENT_FIELDS,
 )
+
+from tcga2hf_pipeline.gdc import GDCClient, in_
 
 EXPANSIONS = [
     "demographic",
@@ -160,6 +160,29 @@ def _patient_row(case: dict[str, Any]) -> dict[str, Any]:
         # Molecular columns default to []; build step fills them in if data is fetched.
         "samples_masked_somatic_mutation": [],
         "samples_gene_expression_quantification": [],
+        # Survival columns (CDR + re-derived) default to "no data" placeholders;
+        # the build step fills them in via cdr.attach_cdr + survival.attach.
+        # We initialize them here so the row has the full PATIENT_FIELDS column
+        # set and the tabular `cases` table doesn't KeyError when slicing.
+        "cdr_matched": False,
+        "cdr_redaction": None,
+        "cdr_OS": None,
+        "cdr_OS_time": None,
+        "cdr_DSS": None,
+        "cdr_DSS_time": None,
+        "cdr_DFI": None,
+        "cdr_DFI_time": None,
+        "cdr_PFI": None,
+        "cdr_PFI_time": None,
+        "cdr_survival_complete": False,
+        "os_event": None,
+        "os_time": None,
+        "dss_event": None,
+        "dss_time": None,
+        "dfi_event": None,
+        "dfi_time": None,
+        "pfi_event": None,
+        "pfi_time": None,
     }
 
 

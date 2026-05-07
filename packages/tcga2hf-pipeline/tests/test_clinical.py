@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
-
 from tcga2hf.schema import (
     ALIQUOT_FIELDS,
     ANALYTE_FIELDS,

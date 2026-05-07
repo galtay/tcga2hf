@@ -8,9 +8,10 @@ from typing import Annotated
 
 import typer
 from dotenv import load_dotenv
-
 from tcga2hf.schema import TABULAR_TABLES
+
 from tcga2hf_pipeline import (
+    cdr,
     clinical,
     dataset_card,
     expression,
@@ -184,6 +185,26 @@ def fetch_expression_cmd(
     )
 
 
+@app.command("fetch-cdr")
+def fetch_cdr_cmd(
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Fetch the Liu et al. 2018 PanCanAtlas CDR workbook (curated TCGA survival).
+
+    Downloads the GDC's PanCanAtlas auxiliary file (UUID
+    1b5f413e-...) into <data-dir>/raw/cdr/. md5-pinned; safe to re-run.
+    The file is frozen at the 2018 data freeze, so coverage stops there
+    — post-2018 cases get `cdr_matched=False` at build time.
+    """
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    typer.echo(f"raw dir: {raw_dir}")
+    out_path = cdr.fetch_cdr_workbook(raw_dir)
+    typer.echo(f"  wrote -> {out_path}")
+    index = cdr.load_cdr_index(raw_dir)
+    typer.echo(f"  CDR rows indexed: {len(index)}")
+
+
 @app.command("build")
 def build_cmd(
     data_dir: DataDirOpt = None,
@@ -208,6 +229,13 @@ def build_cmd(
         shutil.rmtree(processed_dir)
     processed_dir.mkdir(parents=True)
 
+    # CDR (Liu et al 2018 curated survival) is shared across all projects;
+    # load once at the top. If `fetch-cdr` hasn't been run, the index is
+    # empty and every patient row gets cdr_matched=False — the build
+    # still works.
+    cdr_index = cdr.load_cdr_index(raw_dir)
+    typer.echo(f"CDR rows indexed: {len(cdr_index)}")
+
     projects: list[str] = []
     gdc_releases: dict[str, str] = {}
     for path in project_files:
@@ -223,13 +251,18 @@ def build_cmd(
             mutations.attach(rows, mut_by_case)
         if expr_by_case:
             expression.attach(rows, expr_by_case)
+        # Liu's CDR survival columns; populate even when cdr_index is
+        # empty so the parquet schema stays stable.
+        cdr.attach_cdr(rows, cdr_index)
 
         n_variants = sum(len(r["samples_masked_somatic_mutation"]) for r in rows)
         n_expr = sum(len(r["samples_gene_expression_quantification"]) for r in rows)
+        n_cdr = sum(1 for r in rows if r["cdr_matched"])
         typer.echo(
             f"  {proj:<12} {len(rows):>4} patients  "
             f"mutations={n_variants:>5} ({len(mut_by_case)} MAFs)  "
-            f"expression={n_expr:>4} aliquots ({len(expr_by_case)} TSVs)"
+            f"expression={n_expr:>4} aliquots ({len(expr_by_case)} TSVs)  "
+            f"cdr={n_cdr}/{len(rows)}"
         )
 
         out = clinical.write_patients(rows, processed_dir, proj)
@@ -291,6 +324,9 @@ def build_tabular_cmd(
         shutil.rmtree(processed_dir)
     processed_dir.mkdir(parents=True)
 
+    cdr_index = cdr.load_cdr_index(raw_dir)
+    typer.echo(f"CDR rows indexed: {len(cdr_index)}")
+
     projects: list[str] = []
     gdc_releases: dict[str, str] = {}
     for path in project_files:
@@ -298,12 +334,17 @@ def build_tabular_cmd(
         projects.append(proj)
         cases = json.loads(path.read_text())
         tables = tabular.build_tables(cases, path.parent)
+        # The `cases` table inherits the cdr_* placeholders from
+        # `clinical._patient_row`; populate them from CDR (no-op for
+        # cases not in Liu's 2018 freeze).
+        cdr.attach_cdr(tables["cases"], cdr_index)
 
         sizes = {name: len(rows) for name, rows in tables.items()}
         # Compact one-line summary of row counts per table — easier to spot
         # cardinality regressions than scrolling through 14 lines per project.
         summary = " ".join(f"{name}={n}" for name, n in sizes.items())
-        typer.echo(f"  {proj:<12} {summary}")
+        n_cdr = sum(1 for r in tables["cases"] if r["cdr_matched"])
+        typer.echo(f"  {proj:<12} {summary}  cdr={n_cdr}/{len(tables['cases'])}")
 
         out_paths = tabular.write_tables(tables, processed_dir, proj)
         # Use any one table's path to print the project's output dir.

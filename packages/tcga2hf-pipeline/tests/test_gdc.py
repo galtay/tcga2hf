@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from tcga2hf_pipeline.gdc import GDCClient, and_, eq, in_
 
 

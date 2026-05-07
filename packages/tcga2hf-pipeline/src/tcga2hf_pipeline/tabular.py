@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
 from tcga2hf.schema import TABULAR_CASES_FIELDS, TABULAR_TABLES
+
 from tcga2hf_pipeline import clinical as _clinical_mod
 from tcga2hf_pipeline import expression as _expression_mod
 from tcga2hf_pipeline import mutations as _mutations_mod

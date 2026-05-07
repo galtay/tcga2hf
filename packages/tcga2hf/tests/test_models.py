@@ -13,7 +13,6 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 from pydantic import ValidationError
-
 from tcga2hf import schema
 from tcga2hf.models import (
     Aliquot,
