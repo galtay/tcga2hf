@@ -18,6 +18,15 @@ dependencies = [
     "typer>=0.25.1",
 ]
 
+[project.optional-dependencies]
+# Reporting: standalone HTML render of dev_research/<paper>/sections/*.md
+# into <paper>/report.html. Pulls in python-markdown for the conversion;
+# everything else (CSS, sortable-table JS) is inlined into the output so
+# the report.html file is fully self-contained.
+report = [
+    "markdown>=3.7",
+]
+
 [project.scripts]
 tcga2hf-pipeline = "tcga2hf_pipeline.cli:app"
 

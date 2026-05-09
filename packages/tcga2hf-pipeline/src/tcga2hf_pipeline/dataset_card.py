@@ -6,194 +6,32 @@ from pathlib import Path
 from tcga2hf_pipeline.genomic import MODALITY_FILTERS as _MODALITY_FILTERS
 
 # ---------------------------------------------------------------------------
-# Static body sections. Single source of truth for content that's also
-# referenced from the repo README — the README links here rather than
-# duplicating the text.
+# Both dataset cards (`gabrielaltay/tcga-patients-open` and
+# `gabrielaltay/tcga-tabular-open`) are presented as two views of the same
+# underlying data, not a primary + secondary pair. They share the same
+# section order; per-view variation lives only in the sentences/tables
+# that genuinely depend on the shape (one-row-per-patient vs
+# one-table-per-source).
+#
+# Section order (both cards):
+#   1. Header (mostly shared)
+#   2. Data model (combined with how-it-was-built; mostly shared)
+#   3. Survival endpoints supplement (mostly shared)
+#   4. Loading (per-view, both use load_dataset)
+#   5. GDC references (shared)
+#   6. License & redistribution (shared)
+#   7. Restrictions on use (shared)
+#   8. Required acknowledgement (shared)
+#   9. Disclaimer (shared)
 # ---------------------------------------------------------------------------
 
 
-_DATA_MODEL = """\
-## Data model
-
-Closely follows the GDC data model — see the [GDC Data Dictionary][gdc-dict]
-for the canonical entity-by-entity definitions. Each row is one `case` (one
-patient) with the full biospecimen subtree:
-
-```
-case          one patient (TCGA-XX-1234)
-└── sample    physical specimen taken from the patient at one timepoint
-              (Primary Tumor, Solid Tissue Normal, Blood Derived Normal, ...)
-    └── portion    a piece of that sample for a specific lab process
-        └── analyte    extracted material of one type (DNA or RNA)
-            └── aliquot    a vial of that analyte handed off for sequencing
-```
-
-Every `days_to_*` field anchors to the case's `index_date` (TCGA: almost
-always `"Diagnosis"`), per the dictionary, so clinical and biospecimen events
-share a single timeline.
-
-### Where this dataset deviates from the GDC
-
-The few places this row layout differs from a direct mapping of the GDC `case`
-tree:
-
-- **Top-level convenience columns.** Each row carries `gdc_portal_url`
-  (templated link to the patient's GDC Data Portal page) and
-  `samples_<gdc_data_type_snake_case>` molecular vectors (e.g.
-  `samples_masked_somatic_mutation`,
-  `samples_gene_expression_quantification`). These let consumers
-  column-project just the modalities they need; each entry carries foreign
-  keys (FKs) back to `samples[].portions[].analytes[].aliquots[]`.
-- **Resolved sample FKs on Mutation Annotation Format (MAF) rows.** The GDC
-  ships MAF variants with aliquot UUIDs in `Tumor_Sample_UUID` /
-  `Matched_Norm_Sample_UUID`; we additionally resolve those to
-  `tumor_sample_id` / `matched_normal_sample_id` so consumers can join
-  straight to `samples[]`.
-- **Lifted expression QC counts.** Each Gene Expression Quantification
-  record has the STAR per-feature quality-control counts `N_unmapped`,
-  `N_multimapping`, `N_noFeature`, `N_ambiguous` lifted from the source
-  Tab-Separated Values (TSV) file onto the row as scalar fields. The
-  `stranded_first` / `stranded_second` columns are dropped — the GDC
-  pipeline harmonizes by [treating all RNA-Seq reads as
-  unstranded](https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/Expression_mRNA_Pipeline/),
-  so `unstranded` is the canonical column.
-"""
+# ===========================================================================
+# Shared content blocks (byte-identical text in both cards)
+# ===========================================================================
 
 
-_LOADING = """\
-## Loading
-
-The [`tcga2hf` package][repo] ships a typed `TcgaHfPatient` pydantic model
-that mirrors this schema and adds convenience joins (tumor/normal pairs,
-mutations-by-gene, expression-by-gene, longitudinal timeline).
-
-```python
-import pyarrow.parquet as pq
-from tcga2hf.models import TcgaHfPatient
-
-t = pq.read_table("TCGA-CHOL/data.parquet")
-patients = [TcgaHfPatient.model_validate(r) for r in t.to_pylist()]
-```
-"""
-
-
-def _render_gdc_requests(projects: list[str], *, consolidated: bool) -> str:
-    """Render a concise summary of the GDC requests this build issues.
-
-    Templated from the live constants in `tcga2hf.clinical` and
-    `tcga2hf.genomic` so the docs can't drift from the code. Full
-    request payloads (the JSON `filters` + `fields` + `expand` blocks)
-    live in those source files; this section only shows the headline
-    filters and where each request's output ends up.
-
-    `consolidated=True` reframes the output mapping for the consolidated
-    patients dataset, where the same three endpoints' outputs end up
-    nested inside one parquet row per patient instead of in separate
-    flat tables.
-    """
-    project_md = ", ".join(f"`{p}`" for p in sorted(projects))
-
-    # Per-modality clause table. One row per (table, modality filter set);
-    # populated from `genomic.MODALITY_FILTERS` so adding a modality
-    # automatically documents itself here.
-    modality_rows: list[str] = []
-    table_for_data_type = {
-        "Masked Somatic Mutation": "masked_somatic_mutation",
-        "Gene Expression Quantification": "gene_expression_quantification",
-    }
-    label_col = "Lands at" if consolidated else "Table"
-    table_header = (
-        f"| {label_col} | data_type | data_format | data_category | "
-        "experimental_strategy | analysis.workflow_type |"
-    )
-    table_sep = "|---|---|---|---|---|---|"
-    for dtype, extras in _MODALITY_FILTERS.items():
-        table = table_for_data_type.get(dtype, dtype)
-        if consolidated:
-            label = f"`samples_{table}` array"
-        else:
-            label = f"`{table}`"
-        cols = [label, f"`{dtype}`"]
-        for col_field in (
-            "data_format",
-            "data_category",
-            "experimental_strategy",
-            "analysis.workflow_type",
-        ):
-            cols.append(f"`{extras.get(col_field, '')}`")
-        modality_rows.append("| " + " | ".join(cols) + " |")
-    modality_table = "\n".join(modality_rows)
-
-    if consolidated:
-        cases_dest = (
-            "feeds the case-level scalars + the nested `demographic`, "
-            "`diagnoses[]`, `follow_ups[]`, `exposures[]`, "
-            "`family_histories[]`, and `samples[]` columns of each "
-            "patient row"
-        )
-        files_dest = (
-            "Each row's molecular content lands in two top-level array "
-            "columns on the same patient row:"
-        )
-        post_data_dest = (
-            "Mutations files are parsed row-by-row into each patient's "
-            "`samples_masked_somatic_mutation` array; expression files "
-            "are parsed and projected into `samples_gene_expression_quantification`."
-        )
-    else:
-        cases_dest = "feeds the `cases` config"
-        files_dest = (
-            "Each modality maps to its own config in this dataset, with "
-            "the combined `/files` responses also feeding the `files` "
-            "config:"
-        )
-        post_data_dest = (
-            "Mutations files are parsed row-by-row into the "
-            "`masked_somatic_mutation` config; expression files are "
-            "parsed gene-row-by-gene-row into the "
-            "`gene_expression_quantification` config."
-        )
-
-    return f"""\
-## How this dataset is built
-
-Three GDC REST endpoints feed every row, with filters and field lists
-constructed in [`src/tcga2hf/clinical.py`][src-clinical] and
-[`src/tcga2hf/genomic.py`][src-genomic] of the [`tcga2hf` repo][repo].
-
-**Projects fetched in this build:** {project_md}.
-
-### `POST /cases`
-
-Filter: `project.project_id IN [<projects above>]`. The request `expand`s
-the full nested `case` structure (demographic + diagnoses → treatments +
-follow_ups + exposures + family_histories + samples → portions →
-analytes → aliquots). The response is captured verbatim into
-`<data-dir>/raw/<project>/cases.json` per project and {cases_dest}. See
-`tcga2hf.clinical.TOP_LEVEL_FIELDS` and `tcga2hf.clinical.EXPANSIONS`
-for the exact field/expand lists.
-
-### `POST /files`
-
-One POST per (project, modality). All requests share
-`cases.project.project_id = <project>` AND `access = open`. The
-remaining clauses lock the format / experimental strategy / workflow
-type so future GDC additions can't silently ship a different pipeline
-under the same `data_type`. {files_dest}
-
-{table_header}
-{table_sep}
-{modality_table}
-
-See `tcga2hf.genomic.MODALITY_FILTERS` and `tcga2hf.genomic.FILE_FIELDS`
-for the full request payload.
-
-### `POST /data` → file bytes
-
-UUIDs returned by `/files` are batched (≤50 per request) into `POST
-/data`; the response is a tar.gz of those files. {post_data_dest} See
-`tcga2hf.gdc.bulk_download` for the batching and retry logic.
-
+_SHARED_PROVENANCE = """\
 ### Provenance pinned per build
 
 - `GET /status` → `data_release` / `tag` / `commit` saved in each
@@ -202,9 +40,251 @@ UUIDs returned by `/files` are batched (≤50 per request) into `POST
   saved alongside the raw data; its SHA-256 is recorded in
   `gdc_status.json`.
 
-[src-clinical]: https://github.com/galtay/tcga2hf/blob/main/src/tcga2hf/clinical.py
-[src-genomic]: https://github.com/galtay/tcga2hf/blob/main/src/tcga2hf/genomic.py
+See the [repository][repo] for full request payloads, filter clauses,
+and the build pipeline source.
 """
+
+
+def _shared_filters_table() -> str:
+    """Canonical `/files` filter clauses per source. Same in both cards.
+
+    Templated from `genomic.MODALITY_FILTERS` so molecular filter docs
+    can't drift from code; the Clinical Supplement row is appended
+    manually since `clinical_supplement.py` uses its own filter set.
+    """
+    header = (
+        "| data_type | data_format | data_category | "
+        "experimental_strategy | analysis.workflow_type |"
+    )
+    sep = "|---|---|---|---|---|"
+    rows: list[str] = []
+    for dtype, extras in _MODALITY_FILTERS.items():
+        cols = [f"`{dtype}`"]
+        for col_field in (
+            "data_format",
+            "data_category",
+            "experimental_strategy",
+            "analysis.workflow_type",
+        ):
+            cols.append(f"`{extras.get(col_field, '')}`")
+        rows.append("| " + " | ".join(cols) + " |")
+    rows.append(
+        "| `Clinical Supplement` | `bcr biotab` | `Clinical` | | |"
+    )
+    return f"{header}\n{sep}\n" + "\n".join(rows)
+
+
+# ===========================================================================
+# Data model section (combined with how-it-was-built)
+# ===========================================================================
+
+
+def _data_model(*, consolidated: bool) -> str:
+    """Section 2: Data model & how this dataset was built.
+
+    Same shape on both cards. Per-view content slots in via the
+    `consolidated` branch (intro sentence + per-view source-mapping
+    table + per-view "specific to this view" prose).
+    """
+    if consolidated:
+        per_view_table = _PATIENT_VIEW_MAPPING
+        per_view_specifics = _PATIENT_VIEW_SPECIFICS
+    else:
+        per_view_table = _TABULAR_VIEW_MAPPING
+        per_view_specifics = _TABULAR_VIEW_SPECIFICS
+
+    return f"""\
+## Data model
+
+### Where the data comes from
+
+Three sources feed each project's data, all open-access:
+
+- **Case-level clinical structure** — fetched from the GDC `/cases`
+  endpoint, returning the full nested case JSON (demographic + diagnoses
+  → treatments + follow_ups + exposures + family_histories + samples →
+  portions → analytes → aliquots). The biospecimen subtree on each case:
+
+  ```
+  case          one patient (TCGA-XX-1234)
+  └── sample    physical specimen taken from the patient at one timepoint
+                (Primary Tumor, Solid Tissue Normal, Blood Derived Normal, ...)
+      └── portion    a piece of that sample for a specific lab process
+          └── analyte    extracted material of one type (DNA or RNA)
+              └── aliquot    a vial of that analyte handed off for sequencing
+  ```
+
+- **Per-modality molecular files** — discovered via `/files` (filtered
+  by the clauses in the table below) and downloaded via `/data`. Each
+  combination locks one `data_type` to a specific GDC pipeline so a
+  future GDC addition can't quietly substitute a different pipeline
+  under the same `data_type`.
+- **BCR Clinical Supplement biotabs** — original Biospecimen Core
+  Resource (BCR) clinical forms shipped as per-project TSVs (one per
+  form: patient, follow_up, nte, drug, radiation, etc.). The harmonized
+  `/cases` endpoint drops or under-populates a number of clinical fields
+  the BCR-original biotabs preserve. The schema varies by cancer type
+  (e.g. BLCA's BCG-response columns don't exist in CHOL's hepatic-marker
+  forms), so each project's biotabs ship only the columns they actually
+  carry. Discovered the same way (`/files` then `/data`) — see the
+  filter table below.
+
+### Source data filters (canonical)
+
+Same in both views of the dataset; each row locks the `/files` query
+for one source:
+
+{_shared_filters_table()}
+
+### How each source appears in this view
+
+{per_view_table}
+
+### Specific to this view
+
+{per_view_specifics}
+
+{_SHARED_PROVENANCE}
+"""
+
+
+_PATIENT_VIEW_MAPPING = """\
+| Source | Where it lands |
+|---|---|
+| GDC `/cases` | nested fields on each patient row (`demographic`, `diagnoses`, `follow_ups`, `exposures`, `family_histories`, `samples`); `gdc_portal_url` link added |
+| Masked Somatic Mutation MAFs | `samples_masked_somatic_mutation` array on each patient row (sample FKs resolved alongside GDC's aliquot UUIDs) |
+| Gene Expression Quantification | `samples_gene_expression_quantification` array on each patient row (`stranded_first` / `stranded_second` dropped — GDC harmonizes as unstranded) |
+| BCR Clinical Supplements | `clinical_supplement` struct on each patient row, with sub-fields `patient` (1 dict) and `follow_ups` / `ntes` / `drugs` / `radiations` / `ablations` / `omfs` (lists of dicts). Sub-fields with no data for the project are omitted. |
+"""
+
+
+_TABULAR_VIEW_MAPPING = """\
+| Source | Where it lands |
+|---|---|
+| GDC `/cases` | `cases` table — one row per patient with the GDC `case` JSON structure preserved as nested struct columns (`demographic`, `diagnoses[]`, `follow_ups[]`, `samples[]`, ...); `gdc_portal_url` link added |
+| Masked Somatic Mutation MAFs | `masked_somatic_mutation` table — one row per variant (sample FKs resolved alongside GDC's aliquot UUIDs) |
+| Gene Expression Quantification | `gene_expression_quantification` table — one row per (aliquot, gene); `stranded_first` / `stranded_second` dropped (GDC harmonizes as unstranded) |
+| BCR Clinical Supplements | `clinical_supplement_*` tables — one per BCR form (patient, follow_up, nte, drug, radiation, ablation, omf) |
+| Per-modality manifests | `files` table — one row per (file, case) with `file_id` / `md5sum` / `data_type` / size; useful for joining a row back to its source file or replaying a specific modality fetch |
+"""
+
+
+_PATIENT_VIEW_SPECIFICS = """\
+- Convenience: each row carries `samples_<modality>` array columns so
+  you can column-project just the molecular data you need without
+  walking the nested GDC entities.
+- Loading: the [`tcga2hf` package][repo] ships a typed `TcgaHfPatient`
+  pydantic model that mirrors this schema and adds convenience joins
+  (tumor/normal pairs, mutations-by-gene, expression-by-gene,
+  longitudinal timeline).
+"""
+
+
+_TABULAR_VIEW_SPECIFICS = """\
+- Joining: every flat row carries `case_submitter_id` (and
+  `aliquot_submitter_id` where applicable) for direct joins back to
+  `cases` without re-resolving UUIDs.
+- Each (project, table) pair is one HuggingFace **config** named
+  `<project>_<table>` (e.g. `TCGA_LUAD_cases`).
+- BCR fields in the `clinical_supplement_*` tables are all typed as
+  strings, with sentinel values like `[Not Available]` preserved
+  verbatim.
+"""
+
+
+# ===========================================================================
+# Survival endpoints supplement (mostly shared; one location sentence varies)
+# ===========================================================================
+
+
+def _shared_survival_endpoints(*, consolidated: bool) -> str:
+    """Section 3: re-derived survival endpoints supplement.
+
+    Forward-compatible phrasing — additional supplements in the future
+    can be added without breaking the framing here ("a supplement..."
+    not "the only supplement...").
+    """
+    if consolidated:
+        location = (
+            "Each patient row carries a top-level **`survival_derived` struct** "
+            "with eight sub-fields: `os_event` / `os_time`, `dss_event` / "
+            "`dss_time`, `pfi_event` / `pfi_time`, `dfi_event` / `dfi_time`."
+        )
+    else:
+        location = (
+            "Surfaced as a standalone **`survival_derived` table** (one row per "
+            "patient, joined to `cases` on `case_submitter_id`) with eight "
+            "columns: `os_event` / `os_time`, `dss_event` / `dss_time`, "
+            "`pfi_event` / `pfi_time`, `dfi_event` / `dfi_time`."
+        )
+    return f"""\
+## Survival endpoints (`survival_derived`)
+
+We have provided a supplement to the GDC source data: re-derived
+survival endpoints — Overall Survival (OS), Disease-Specific Survival
+(DSS), Progression-Free Interval (PFI), Disease-Free Interval (DFI) —
+following the algorithm published by **Liu et al. 2018**
+([DOI 10.1016/j.cell.2018.02.052](https://doi.org/10.1016/j.cell.2018.02.052)).
+
+{location} `*_event` is 0/1 (event observed vs censored); `*_time` is
+days from `index_date` (TCGA: diagnosis date). DFI is null for SKCM /
+THYM / UVM / LAML — Liu specifies no DFI for those tumor types.
+
+We've reimplemented Liu's method against the current TCGA data and find
+broad agreement with the original curated CDR. Differences exist and are
+expected: this is a newer release of the underlying GDC data, so
+re-curated clinical values, post-2018 patient additions, and schema
+migrations all contribute to the gap. This work is evolving; see the
+[repository][repo] for the full reproduction report and per-endpoint
+methodology.
+
+**Why we don't ship Liu's curated 2018 values directly:** the CDR is a
+frozen 2018 snapshot derived from a since-modified GDC release.
+Including those values would lock in irreproducible source-data drift.
+We re-derive on every build, so the values reflect the current GDC and
+are reproducible from this dataset's other tables alone.
+"""
+
+
+# ===========================================================================
+# Loading examples (per-view; both use load_dataset)
+# ===========================================================================
+
+
+_PATIENT_LOADING = """\
+## Loading
+
+```python
+from datasets import load_dataset
+
+# One config per TCGA project.
+luad = load_dataset("gabrielaltay/tcga-patients-open", "TCGA-LUAD")
+```
+
+Each row is one patient with the full GDC `case` structure nested
+in-place plus the `survival_derived` struct.
+"""
+
+
+_TABULAR_LOADING = """\
+## Loading
+
+```python
+from datasets import load_dataset
+
+# One config per (project, table).
+# Config names are <project>_<table> with dashes replaced by underscores.
+luad_cases = load_dataset("gabrielaltay/tcga-tabular-open", "TCGA_LUAD_cases")
+luad_muts = load_dataset(
+    "gabrielaltay/tcga-tabular-open", "TCGA_LUAD_masked_somatic_mutation"
+)
+```
+"""
+
+
+# ===========================================================================
+# GDC references / License / Disclaimer (all shared)
+# ===========================================================================
 
 
 _GDC_REFERENCES = """\
@@ -269,10 +349,9 @@ Policy references:
 
 ## Disclaimer
 
-Re-derive from the GDC for any analysis where freshness matters; the
-dataset reflects the GDC release pinned in each project's
-`gdc_status.json`. The pipeline that builds this dataset is on GitHub at
-[`galtay/tcga2hf`][repo].
+**This project is not affiliated with the NCI, GDC, or the TCGA Research
+Network.** It is an experimental open-source pipeline that may change
+significantly between versions. Pipeline source: [`galtay/tcga2hf`][repo].
 """
 
 
@@ -281,13 +360,48 @@ dataset reflects the GDC release pinned in each project's
 _LINK_REFS = """\
 [gdc-dict]: https://docs.gdc.cancer.gov/Data_Dictionary/
 [repo]: https://github.com/galtay/tcga2hf
+[patients]: https://huggingface.co/datasets/gabrielaltay/tcga-patients-open
+[tabular]: https://huggingface.co/datasets/gabrielaltay/tcga-tabular-open
 """
 
 
-# ---------------------------------------------------------------------------
-# Dynamic helpers — produce per-build header sections from project list /
-# release info passed in at write time.
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Header builder (mostly shared; one sentence varies per view)
+# ===========================================================================
+
+
+def _header(*, consolidated: bool, timestamp: str, release_md: str) -> str:
+    if consolidated:
+        title = "TCGA Patients (Open Access)"
+        view_sentence = (
+            "**This view presents one HuggingFace subset per TCGA project**, "
+            "with one row per patient. See the [`tcga-tabular-open`][tabular] "
+            "companion for a per-table view of the same underlying data."
+        )
+    else:
+        title = "TCGA Tabular (Open Access)"
+        view_sentence = (
+            "**This view presents one HuggingFace subset per (project, table)**. "
+            "See the [`tcga-patients-open`][patients] companion for a per-row "
+            "view of the same underlying data."
+        )
+    return f"""
+# {title}
+
+Open-access TCGA data from the NCI Genomic Data Commons (GDC). Covers
+all 33 TCGA projects.
+
+{view_sentence}
+
+- **Generated:** {timestamp}
+- **Schema:** derived from the [GDC Data Dictionary][gdc-dict].
+{release_md}
+"""
+
+
+# ===========================================================================
+# Dynamic helpers (per-build header inputs + configs YAML)
+# ===========================================================================
 
 
 def _configs_yaml(projects: list[str]) -> str:
@@ -312,13 +426,56 @@ def _release_md(gdc_releases: dict[str, str] | None) -> str:
     return "\n".join(lines)
 
 
+def _tabular_configs_yaml(
+    processed_dir: Path,
+    projects: list[str],
+    tables: list[str],
+) -> str:
+    """One config per (project, table) where the parquet actually exists.
+
+    HF Data Studio expects splits to be train / validation / test (its
+    dataset-server warns when a config has more than three). We don't have
+    train/val/test slices, so we model each (project, table) pair as its
+    own config and leave the split slot at the conventional `train`.
+
+    Config names are `<project>_<table>` with dashes in the project_id
+    normalized to underscores (e.g. `TCGA_CHOL_cases`) so the config name
+    is a valid identifier in HF Data Studio's SQL console without further
+    sanitization. File paths on disk keep the canonical dash form
+    (`TCGA-CHOL/cases/data.parquet`).
+
+    Filesystem-aware: `clinical_supplement_*` tables are emitted per
+    project only when the corresponding biotab form has any rows (e.g.
+    LAML has `clinical_supplement_patient` but no follow_up; only LIHC has
+    `clinical_supplement_ablation`). Skipping non-existent paths keeps HF
+    Data Studio from emitting "file not found" warnings.
+    """
+    lines = ["configs:"]
+    for project in sorted(projects):
+        config_proj = project.replace("-", "_")
+        for table in tables:
+            parquet_path = processed_dir / project / table / "data.parquet"
+            if not parquet_path.exists():
+                continue
+            lines.append(f"  - config_name: {config_proj}_{table}")
+            lines.append("    data_files:")
+            lines.append("      - split: train")
+            lines.append(f"        path: {project}/{table}/data.parquet")
+    return "\n".join(lines)
+
+
+# ===========================================================================
+# Per-view writers — choose configs YAML, header, loading; body identical order
+# ===========================================================================
+
+
 def write_card(
     processed_dir: Path,
     projects: list[str],
     gdc_releases: dict[str, str] | None = None,
 ) -> Path:
+    """Write the patients dataset card."""
     timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    projects_md = ", ".join(f"`{p}`" for p in sorted(projects))
     configs_block = _configs_yaml(projects)
     release_md = _release_md(gdc_releases)
 
@@ -336,28 +493,12 @@ tags:
 ---
 """
 
-    header = f"""
-# TCGA Patients (Open Access)
-
-Open-access patient data from The Cancer Genome Atlas (TCGA), pulled from the
-National Cancer Institute (NCI) Genomic Data Commons (GDC). One HuggingFace
-(HF) subset per TCGA project; one row per patient.
-
-- **Projects included:** {projects_md}
-- **Generated:** {timestamp}
-- **Source:** GDC `/cases` endpoint, open-access tier only.
-- **Schema:** derived from the [GDC Data Dictionary][gdc-dict]; the live
-  dictionary the GDC was serving when the data was fetched is hashed into
-  each project's `gdc_status.json` for provenance.
-{release_md}
-"""
-
     body = "\n".join(
         [
-            header,
-            _DATA_MODEL,
-            _render_gdc_requests(projects, consolidated=True),
-            _LOADING,
+            _header(consolidated=True, timestamp=timestamp, release_md=release_md),
+            _data_model(consolidated=True),
+            _shared_survival_endpoints(consolidated=True),
+            _PATIENT_LOADING,
             _GDC_REFERENCES,
             _LICENSE_AND_REDISTRIBUTION,
             _LINK_REFS,
@@ -370,178 +511,21 @@ National Cancer Institute (NCI) Genomic Data Commons (GDC). One HuggingFace
     return out_path
 
 
-# ---------------------------------------------------------------------------
-# Tabular dataset card (`gabrielaltay/tcga-tabular-open`)
-# Companion to the consolidated patients card above. Reuses the same
-# license / GDC references / disclaimer blocks; replaces the data-model
-# section with a tabular-specific overview + SQL example.
-# ---------------------------------------------------------------------------
-
-
-_TABULAR_DATA_MODEL = """\
-## Data model
-
-Four tables per project. Same source data as the consolidated companion
-dataset [`gabrielaltay/tcga-patients-open`][patients], different shape:
-the molecular rows here are flat (one row per variant, one row per
-aliquot-gene) and easy to query in SQL, while the `cases` table keeps
-the GDC `cases.json` structure intact (one row per patient, with
-demographic / diagnoses / follow_ups / exposures / family_histories /
-samples nested under their original GDC keys).
-
-The biospecimen hierarchy lives inside `cases.samples[]`:
-
-```
-case          one patient (TCGA-XX-1234)        ← cases row
-└── sample    physical specimen at one timepoint
-    └── portion    a piece of that sample for a lab process
-        └── analyte    DNA or RNA extracted
-            └── aliquot    a vial handed off for sequencing
-```
-
-Each (project, table) pair is one HF **config** named
-`<project>_<table>` (e.g. `TCGA_LUAD_cases`,
-`TCGA_LUAD_masked_somatic_mutation`); each config has the canonical
-`train` split. We use a config per pair rather than splits-per-project
-within one config because HF Data Studio expects splits to be
-train / validation / test, and we have no such semantics.
-
-| Table | Grain | Source |
-|---|---|---|
-| `cases` | 1 / patient | GDC `cases.json` verbatim (JSON keys → columns; nested fields kept) |
-| `masked_somatic_mutation` | 1 / variant | open-access MAF (Mutation Annotation Format) files |
-| `gene_expression_quantification` | 1 / (aliquot, gene) | RNA-Seq STAR counts TSV gene rows |
-| `files` | 1 / (file, case) | per-modality `manifest.json` (file provenance / GDC metadata) |
-
-The `cases` row mirrors the GDC `case` JSON: scalar fields stay scalar,
-`demographic` stays a struct, `diagnoses` / `follow_ups` / `exposures` /
-`family_histories` / `samples` stay lists of structs (with the
-`samples[].portions[].analytes[].aliquots[]` biospecimen tree intact). To
-walk it from SQL, use DuckDB's `UNNEST` on the array columns; for ergonomic
-Python access, the consolidated [`tcga-patients-open`][patients] dataset
-ships a typed `TcgaHfPatient` pydantic model with helper methods.
-
-### Foreign keys
-
-Every flat table (`masked_somatic_mutation`,
-`gene_expression_quantification`, `files`) carries `case_id` and
-`case_submitter_id` columns so users can filter and join without
-roundtripping through `cases`. UUID FKs are paired with their
-human-readable `*_submitter_id` form (e.g. `case_submitter_id` =
-`TCGA-3X-AAVB`):
-
-- `masked_somatic_mutation`: `case_id`, `case_submitter_id`,
-  `tumor_sample_id`, `matched_normal_sample_id`, `source_file_id`
-- `gene_expression_quantification`: `case_id`, `case_submitter_id`,
-  `aliquot_id`, `aliquot_submitter_id`, `source_file_id`
-- `files`: `case_id`, `case_submitter_id`, `file_id`
-
-### Example: TP53 mutations in TCGA-LUAD via SQL
-
-```sql
--- HF Data Studio's SQL console exposes each (config, split) pair as a
--- single table named `<config>_<split>` (lowercased). With config
--- `TCGA_LUAD_masked_somatic_mutation` × split `train` →
--- `tcga_luad_masked_somatic_mutation_train`.
-SELECT case_submitter_id, Hugo_Symbol, HGVSp_Short, t_alt_count, t_depth
-FROM tcga_luad_masked_somatic_mutation_train
-WHERE Hugo_Symbol = 'TP53' AND Variant_Classification != 'Silent'
-ORDER BY t_alt_count DESC
-LIMIT 50;
-```
-
-Want all the data nested per patient instead? See the consolidated
-[`tcga-patients-open`][patients] dataset.
-
-[patients]: https://huggingface.co/datasets/gabrielaltay/tcga-patients-open
-"""
-
-
-_TABULAR_LOADING = """\
-## Loading
-
-One config per (project, table). Config names use underscores
-throughout (e.g. `TCGA_LUAD_masked_somatic_mutation`); each config has
-a single conventional `train` split. File paths on disk keep the
-canonical dash-separated GDC project_id (`TCGA-LUAD/...`).
-
-### `datasets`
-
-```python
-from datasets import load_dataset
-
-# LUAD cases (one row per patient, nested entities preserved):
-luad_cases = load_dataset(
-    "gabrielaltay/tcga-tabular-open", "TCGA_LUAD_cases", split="train"
-)
-luad_muts = load_dataset(
-    "gabrielaltay/tcga-tabular-open",
-    "TCGA_LUAD_masked_somatic_mutation",
-    split="train",
-)
-```
-
-### DuckDB (remote, via `hf://`)
-
-DuckDB can query the parquets in this repo directly without `datasets`,
-using the [`hf://` URL scheme][duckdb-hf]. The dataset is public, so no
-auth is required. Row groups + page indexes let column-projection +
-filter pushdown skip most of the data on selective queries.
-
-```python
-import duckdb
-duckdb.sql('''
-    SELECT case_submitter_id, Hugo_Symbol, HGVSp_Short, t_alt_count, t_depth
-    FROM "hf://datasets/gabrielaltay/tcga-tabular-open/TCGA-LUAD/masked_somatic_mutation/data.parquet"
-    WHERE Hugo_Symbol = 'TP53' AND Variant_Classification != 'Silent'
-    ORDER BY t_alt_count DESC LIMIT 10
-''').show()
-```
-
-[duckdb-hf]: https://huggingface.co/docs/hub/datasets-duckdb-sql
-"""
-
-
-def _tabular_configs_yaml(projects: list[str], tables: list[str]) -> str:
-    """One config per (project, table); one canonical `train` split each.
-
-    HF Data Studio expects splits to be train / validation / test (its
-    dataset-server warns when a config has more than three). We don't have
-    train/val/test slices, so we model each (project, table) pair as its
-    own config and leave the split slot at the conventional `train`.
-
-    Config names are `<project>_<table>` with dashes in the project_id
-    normalized to underscores (e.g. `TCGA_CHOL_cases`) so the config name
-    is a valid identifier in HF Data Studio's SQL console without further
-    sanitization. File paths on disk keep the canonical dash form
-    (`TCGA-CHOL/cases/data.parquet`).
-    """
-    lines = ["configs:"]
-    for project in sorted(projects):
-        config_proj = project.replace("-", "_")
-        for table in tables:
-            lines.append(f"  - config_name: {config_proj}_{table}")
-            lines.append("    data_files:")
-            lines.append("      - split: train")
-            lines.append(f"        path: {project}/{table}/data.parquet")
-    return "\n".join(lines)
-
-
 def write_tabular_card(
     processed_dir: Path,
     projects: list[str],
     tables: list[str],
     gdc_releases: dict[str, str] | None = None,
 ) -> Path:
-    """Write the dataset card for the tabular HF dataset.
+    """Write the tabular dataset card.
 
     `tables` is the ordered list of table names emitted per project (the
-    keys of `tcga2hf.schema.TABULAR_TABLES`). Same license / GDC refs /
-    disclaimer blocks as the patients card.
+    keys of `tcga2hf.schema.TABULAR_TABLES` plus the `clinical_supplement_*`
+    flex-schema tables). Same body order as the patients card; only
+    configs YAML + header view-sentence + loading example differ.
     """
     timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    projects_md = ", ".join(f"`{p}`" for p in sorted(projects))
-    configs_block = _tabular_configs_yaml(projects, tables)
+    configs_block = _tabular_configs_yaml(processed_dir, projects, tables)
     release_md = _release_md(gdc_releases)
 
     frontmatter = f"""---
@@ -558,28 +542,11 @@ tags:
 ---
 """
 
-    header = f"""
-# TCGA Tabular (Open Access)
-
-Open-access TCGA data from the National Cancer Institute (NCI) Genomic
-Data Commons (GDC), reshaped as one HuggingFace (HF) subset per (project,
-table). Companion to the consolidated nested-patient dataset
-[`gabrielaltay/tcga-patients-open`][patients].
-
-- **Projects included:** {projects_md}
-- **Tables per project:** {", ".join(f"`{t}`" for t in tables)}
-- **Generated:** {timestamp}
-- **Source:** GDC `/cases` endpoint + per-modality MAFs and TSVs,
-  open-access tier only.
-- **Schema:** derived from the [GDC Data Dictionary][gdc-dict].
-{release_md}
-"""
-
     body = "\n".join(
         [
-            header,
-            _TABULAR_DATA_MODEL,
-            _render_gdc_requests(projects, consolidated=False),
+            _header(consolidated=False, timestamp=timestamp, release_md=release_md),
+            _data_model(consolidated=False),
+            _shared_survival_endpoints(consolidated=False),
             _TABULAR_LOADING,
             _GDC_REFERENCES,
             _LICENSE_AND_REDISTRIBUTION,

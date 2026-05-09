@@ -119,24 +119,31 @@ def test_strict_mode_rejects_unknown_fields() -> None:
 def test_pydantic_fields_match_pa_fields_exactly() -> None:
     """The pydantic field sets must equal the GDC dictionary (`*_FIELDS`)
     field sets. If gdcdictionary adds/removes a field upstream, the pyarrow
-    schema is regenerated; this test fails until pydantic catches up."""
-    pairs: list[tuple[type, list]] = [
-        (Aliquot, schema.ALIQUOT_FIELDS),
-        (Analyte, schema.ANALYTE_FIELDS),
-        (Portion, schema.PORTION_FIELDS),
-        (Sample, schema.SAMPLE_FIELDS),
-        (Demographic, schema.DEMOGRAPHIC_FIELDS),
-        (Treatment, schema.TREATMENT_FIELDS),
-        (Diagnosis, schema.DIAGNOSIS_FIELDS),
-        (FollowUp, schema.FOLLOW_UP_FIELDS),
-        (Exposure, schema.EXPOSURE_FIELDS),
-        (FamilyHistory, schema.FAMILY_HISTORY_FIELDS),
-        (Mutation, schema.MUTATION_FIELDS),
-        (GeneExpression, schema.EXPRESSION_FIELDS),
-        (TcgaHfPatient, schema.PATIENT_FIELDS),
+    schema is regenerated; this test fails until pydantic catches up.
+
+    Designed-in exception: TcgaHfPatient declares `clinical_supplement` as
+    a flex `dict` field outside PATIENT_FIELDS because BCR biotab columns
+    vary by cancer type — they're inferred per project at parquet write
+    time rather than enumerated in the global schema.
+    """
+    # (cls, fields, extra_pyd_fields_intentionally_outside_schema)
+    pairs: list[tuple[type, list, set[str]]] = [
+        (Aliquot, schema.ALIQUOT_FIELDS, set()),
+        (Analyte, schema.ANALYTE_FIELDS, set()),
+        (Portion, schema.PORTION_FIELDS, set()),
+        (Sample, schema.SAMPLE_FIELDS, set()),
+        (Demographic, schema.DEMOGRAPHIC_FIELDS, set()),
+        (Treatment, schema.TREATMENT_FIELDS, set()),
+        (Diagnosis, schema.DIAGNOSIS_FIELDS, set()),
+        (FollowUp, schema.FOLLOW_UP_FIELDS, set()),
+        (Exposure, schema.EXPOSURE_FIELDS, set()),
+        (FamilyHistory, schema.FAMILY_HISTORY_FIELDS, set()),
+        (Mutation, schema.MUTATION_FIELDS, set()),
+        (GeneExpression, schema.EXPRESSION_FIELDS, set()),
+        (TcgaHfPatient, schema.PATIENT_FIELDS, {"clinical_supplement"}),
     ]
-    for cls, fields in pairs:
-        pyd_names = set(cls.model_fields)
+    for cls, fields, extras in pairs:
+        pyd_names = set(cls.model_fields) - extras
         pa_names = {f.name for f in fields}
         assert pyd_names == pa_names, (
             f"{cls.__name__}: pydantic - pa = {pyd_names - pa_names}; "

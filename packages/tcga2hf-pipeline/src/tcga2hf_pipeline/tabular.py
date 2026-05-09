@@ -33,6 +33,7 @@ import pandas as pd
 from tcga2hf.schema import TABULAR_CASES_FIELDS, TABULAR_TABLES
 
 from tcga2hf_pipeline import clinical as _clinical_mod
+from tcga2hf_pipeline import clinical_supplement as _clinical_supplement_mod
 from tcga2hf_pipeline import expression as _expression_mod
 from tcga2hf_pipeline import mutations as _mutations_mod
 
@@ -252,15 +253,62 @@ def build_tables(
     cases: list[dict[str, Any]],
     project_raw_dir: Path,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Build every tabular table for one project. Keys match `TABULAR_TABLES`."""
+    """Build every tabular table for one project.
+
+    Returns one entry per table keyed by table name. The fixed-schema
+    keys (`cases`, `masked_somatic_mutation`, `gene_expression_quantification`,
+    `files`, `survival_derived`) match `TABULAR_TABLES`. The
+    `clinical_supplement_*` keys are flex-schema tables — their parquet
+    column set is inferred per project, since BCR biotab forms vary by
+    cancer type (e.g. BLCA's clinical_patient form has bladder-specific
+    fields that don't exist in CHOL's). Cross-project queries union via
+    HF `concatenate_datasets` with NULL padding — the same pattern
+    cBioPortal and the GDC use for their per-study clinical exports.
+
+    Note: the `survival_derived` table starts empty here. The caller must
+    `survival.attach_survival(tables["cases"])` and then call
+    `derived_survival_rows(tables["cases"])` to populate it. Splitting
+    that off keeps `build_tables` purely deterministic on raw inputs;
+    survival re-derivation depends on Clinical Supplement data the caller
+    may attach beforehand.
+    """
     mut_by_case = _mutations_mod.load_for_project(project_raw_dir)
 
-    return {
+    tables: dict[str, list[dict[str, Any]]] = {
         "cases": _cases_rows(cases),
         "masked_somatic_mutation": _mutations_rows(cases, mut_by_case),
         "gene_expression_quantification": _expression_rows(cases, project_raw_dir),
         "files": _files_rows(project_raw_dir),
+        "survival_derived": [],
     }
+
+    supp_rows = _clinical_supplement_mod.build_tabular_rows(
+        project_raw_dir / "clinical_supplement"
+    )
+    for suffix, rows in supp_rows.items():
+        tables[f"clinical_supplement_{suffix}"] = rows
+    return tables
+
+
+def derived_survival_rows(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project the `survival_derived` struct off each case row into a flat
+    table. Caller must run `survival.attach_survival(cases)` first.
+
+    Output: one row per case with `case_submitter_id` plus the 8 derived
+    survival fields (os_event, os_time, dss_event, dss_time, pfi_event,
+    pfi_time, dfi_event, dfi_time). Rows whose `survival_derived` is None
+    or all-null are skipped — they have nothing to contribute.
+    """
+    out: list[dict[str, Any]] = []
+    for r in cases:
+        sd = r.get("survival_derived") or {}
+        if all(sd.get(k) is None for k in (
+            "os_event", "os_time", "dss_event", "dss_time",
+            "pfi_event", "pfi_time", "dfi_event", "dfi_time",
+        )):
+            continue
+        out.append({"case_submitter_id": r["case_submitter_id"], **sd})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +335,11 @@ def write_tables(
 ) -> dict[str, Path]:
     """Write each table to `<processed_dir>/<project_id>/<table>/data.parquet`.
 
+    Tables in `TABULAR_TABLES` use their fixed pan-cancer schema. Tables
+    not in that map (today: `clinical_supplement_*`) get schema inferred
+    from rows — each project ships only the columns its biotab forms
+    contain.
+
     Uses the same row-group + page-index settings as the consolidated build
     so HF Data Studio can scan large tables (notably `expression`) without
     hitting its scan-size limit.
@@ -298,10 +351,17 @@ def write_tables(
     project_dir = processed_dir / project_id
     project_dir.mkdir(parents=True, exist_ok=True)
     for table_name, rows in tables.items():
-        schema = TABULAR_TABLES[table_name]
         out_path = project_dir / table_name / "data.parquet"
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        table = pa.Table.from_pylist(rows, schema=schema)
+        if table_name in TABULAR_TABLES:
+            table = pa.Table.from_pylist(rows, schema=TABULAR_TABLES[table_name])
+        elif rows:
+            # Flex-schema table — let pyarrow infer column types per project.
+            # Empty-table case skipped: zero-row biotab forms (e.g. LAML's
+            # missing follow_up) write nothing rather than a 0×0 parquet.
+            table = pa.Table.from_pylist(rows)
+        else:
+            continue
         pq.write_table(
             table,
             out_path,

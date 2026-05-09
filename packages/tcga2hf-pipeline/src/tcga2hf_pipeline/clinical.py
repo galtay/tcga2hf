@@ -160,29 +160,16 @@ def _patient_row(case: dict[str, Any]) -> dict[str, Any]:
         # Molecular columns default to []; build step fills them in if data is fetched.
         "samples_masked_somatic_mutation": [],
         "samples_gene_expression_quantification": [],
-        # Survival columns (CDR + re-derived) default to "no data" placeholders;
-        # the build step fills them in via cdr.attach_cdr + survival.attach.
-        # We initialize them here so the row has the full PATIENT_FIELDS column
-        # set and the tabular `cases` table doesn't KeyError when slicing.
-        "cdr_matched": False,
-        "cdr_redaction": None,
-        "cdr_OS": None,
-        "cdr_OS_time": None,
-        "cdr_DSS": None,
-        "cdr_DSS_time": None,
-        "cdr_DFI": None,
-        "cdr_DFI_time": None,
-        "cdr_PFI": None,
-        "cdr_PFI_time": None,
-        "cdr_survival_complete": False,
-        "os_event": None,
-        "os_time": None,
-        "dss_event": None,
-        "dss_time": None,
-        "dfi_event": None,
-        "dfi_time": None,
-        "pfi_event": None,
-        "pfi_time": None,
+        # Re-derived survival endpoints (Liu et al. 2018 algorithm). Build
+        # step fills the struct via `survival.attach_survival`. Initialized
+        # here as an all-null struct so pyarrow's `from_pylist(rows, schema=PATIENTS)`
+        # can lift the column even when survival hasn't been attached yet.
+        "survival_derived": {
+            "os_event": None, "os_time": None,
+            "dss_event": None, "dss_time": None,
+            "pfi_event": None, "pfi_time": None,
+            "dfi_event": None, "dfi_time": None,
+        },
     }
 
 
@@ -198,6 +185,59 @@ def to_patient_rows(cases: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 _ROW_GROUP_SIZE = 50
 
 
+_SUPPLEMENT_FORMS = ("patient", "follow_ups", "ntes", "drugs",
+                     "radiations", "ablations", "omfs")
+
+
+def _build_clinical_supplement_column(rows: list[dict[str, Any]]) -> pa.Array | None:
+    """Build a per-project pyarrow column for the flex clinical_supplement struct.
+
+    BCR biotab schemas vary by cancer type, so we don't enumerate sub-fields
+    in the global PATIENTS schema; instead we let pyarrow infer the struct
+    type from the actual data per project. Form keys with no data for any
+    patient in the project are dropped (e.g. LAML has no follow_ups, so its
+    `clinical_supplement` struct has no `follow_ups` key) — this keeps
+    pyarrow from trying to infer a type from all-empty lists.
+
+    Returns None if no patient in the project has any supplement data.
+    """
+    payloads: list[dict[str, Any] | None] = []
+    keys_with_data: set[str] = set()
+    for row in rows:
+        supp = row.get("clinical_supplement")
+        if not supp:
+            payloads.append(None)
+            continue
+        keep: dict[str, Any] = {}
+        for k in _SUPPLEMENT_FORMS:
+            v = supp.get(k)
+            if k == "patient":
+                if v:
+                    keep[k] = v
+                    keys_with_data.add(k)
+            else:
+                # list-valued forms — keep the list (even if empty for this
+                # patient) only if at least one patient in the project has
+                # entries for it. Otherwise drop the key entirely.
+                if v:
+                    keys_with_data.add(k)
+                keep[k] = v or []
+        payloads.append(keep)
+
+    if not keys_with_data:
+        return None
+
+    # Drop any form keys that turned out to be empty for every patient in
+    # the project (pyarrow can't infer a struct type from all-empty lists).
+    cleaned: list[dict[str, Any] | None] = []
+    for p in payloads:
+        if p is None:
+            cleaned.append(None)
+            continue
+        cleaned.append({k: v for k, v in p.items() if k in keys_with_data})
+    return pa.array(cleaned)
+
+
 def write_patients(rows: list[dict[str, Any]], processed_dir: Path, project_id: str) -> Path:
     """Write a single project's patient rows to <project_id>/data.parquet.
 
@@ -207,10 +247,20 @@ def write_patients(rows: list[dict[str, Any]], processed_dir: Path, project_id: 
     Row groups are sized for the HF Dataset Viewer (see `_ROW_GROUP_SIZE`) and
     a page index is written so the Viewer can read only the bytes it needs to
     render a page of rows rather than scanning the whole row group.
+
+    The optional `clinical_supplement` column is built separately from the
+    fixed PATIENTS schema because BCR biotab fields vary by cancer type;
+    its struct shape is inferred per project from the row data.
     """
     out_path = processed_dir / project_id / "data.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Strip clinical_supplement before applying the strict PATIENTS schema
+    # (pyarrow's from_pylist silently drops extra dict keys, but being
+    # explicit is clearer); attach it as a separate flex-typed column after.
+    supp_col = _build_clinical_supplement_column(rows)
     table = pa.Table.from_pylist(rows, schema=PATIENTS)
+    if supp_col is not None:
+        table = table.append_column("clinical_supplement", supp_col)
     pq.write_table(
         table,
         out_path,

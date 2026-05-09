@@ -707,41 +707,45 @@ PATIENT_FIELDS: list[pa.Field] = [
         "samples_gene_expression_quantification",
         pa.list_(pa.struct(EXPRESSION_FIELDS)),
     ),
-    # Curated survival endpoints from Liu et al., Cell 2018 (TCGA Pan-Cancer
-    # Clinical Data Resource — CDR). Sourced from the GDC's PanCanAtlas
-    # auxiliary file (UUID 1b5f413e-a8d1-4d10-92eb-7c4ae739ed81); locked to
-    # Liu et al's 2018 data freeze, so cases added to the GDC since then
-    # are unmatched and have null cdr_* values. `cdr_matched` is the audit
-    # flag. Column names track Liu's verbatim — `cdr_OS` is the OS event
-    # (0/1), `cdr_OS_time` is the time in days from index, etc.
-    pa.field("cdr_matched", pa.bool_()),
-    pa.field("cdr_redaction", pa.string()),
-    pa.field("cdr_OS", pa.int64()),
-    pa.field("cdr_OS_time", pa.float64()),
-    pa.field("cdr_DSS", pa.int64()),
-    pa.field("cdr_DSS_time", pa.float64()),
-    pa.field("cdr_DFI", pa.int64()),
-    pa.field("cdr_DFI_time", pa.float64()),
-    pa.field("cdr_PFI", pa.int64()),
-    pa.field("cdr_PFI_time", pa.float64()),
-    pa.field("cdr_survival_complete", pa.bool_()),
-    # Same survival endpoints, re-derived from the current GDC data using
-    # Liu et al's documented algorithms (see TCGA-CDR_Notes sheet in the
-    # source workbook). Full coverage — populated for every patient,
-    # including the post-2018-freeze cases CDR can't reach.
-    # `*_event` is 0/1, `*_time` is days from `index_date`. DFI is null
-    # for SKCM / THYM / UVM (Liu specifies no DFI for these tumor types).
-    pa.field("os_event", pa.int64()),
-    pa.field("os_time", pa.float64()),
-    pa.field("dss_event", pa.int64()),
-    pa.field("dss_time", pa.float64()),
-    pa.field("dfi_event", pa.int64()),
-    pa.field("dfi_time", pa.float64()),
-    pa.field("pfi_event", pa.int64()),
-    pa.field("pfi_time", pa.float64()),
+    # Survival endpoints — re-derived from the current GDC data using the
+    # algorithm published by Liu et al. 2018 (Cell, TCGA Pan-Cancer Clinical
+    # Data Resource). Implementation in `tcga2hf_pipeline.survival`;
+    # validation against Liu's curated 2018 CDR workbook lives in
+    # `dev_research/liu_2018/report.html`.
+    #
+    # Why we don't ship Liu's curated 2018 values directly: the CDR is a
+    # frozen 2018 snapshot derived from a since-modified GDC release. Baking
+    # those values into this dataset would lock in irreproducible source
+    # drift. Re-deriving on every build keeps these values reproducible
+    # from the dataset's other tables alone. Headline agreement against
+    # Liu's CDR (both NA OR populated within 30 days): OS 98.2%, DSS 93.2%,
+    # PFI 96.3%, DFI 90.1%.
+    #
+    # Sub-field semantics: `*_event` is 0/1 (event observed vs censored),
+    # `*_time` is days from `index_date` (TCGA: diagnosis date). DFI is
+    # null for SKCM / THYM / UVM / LAML — Liu specifies no DFI for those
+    # tumor types.
+    pa.field("survival_derived", pa.struct([
+        pa.field("os_event", pa.int64()),
+        pa.field("os_time", pa.float64()),
+        pa.field("dss_event", pa.int64()),
+        pa.field("dss_time", pa.float64()),
+        pa.field("pfi_event", pa.int64()),
+        pa.field("pfi_time", pa.float64()),
+        pa.field("dfi_event", pa.int64()),
+        pa.field("dfi_time", pa.float64()),
+    ])),
 ]
 
 PATIENTS = pa.schema(PATIENT_FIELDS)
+
+
+# Sub-fields of the `survival_derived` struct. Single source of truth for
+# the new tabular `survival_derived` table (FK + one row per patient) and
+# for `survival.attach_survival` to enumerate when populating both layouts.
+SURVIVAL_DERIVED_FIELDS: list[pa.Field] = [
+    f for f in next(f.type for f in PATIENT_FIELDS if f.name == "survival_derived")
+]
 
 
 # ---------------------------------------------------------------------------
@@ -836,15 +840,31 @@ TABULAR_FILES_FIELDS: list[pa.Field] = [
 ]
 
 
+# Survival endpoints (one row per patient) — flat view of the
+# `survival_derived` struct from PATIENT_FIELDS. Same eight values; this
+# layout suits the tabular dataset's SQL-friendly purpose so users can
+# `SELECT case_submitter_id, os_event, os_time FROM survival_derived`
+# without unnesting. Provenance / methodology lives in the `survival_derived`
+# field comment in PATIENT_FIELDS above.
+TABULAR_SURVIVAL_DERIVED_FIELDS: list[pa.Field] = [
+    pa.field("case_submitter_id", pa.string()),
+    *SURVIVAL_DERIVED_FIELDS,
+]
+
+
 # Map of table-name → schema, used by the build-tabular command and the
 # dataset card generator. Table names mirror the GDC's stable concepts:
 # `cases` (cases.json), `masked_somatic_mutation` and
 # `gene_expression_quantification` (snake_cased GDC `data_type` enum
 # values), `files` (per-modality manifests, derived from the GDC `/files`
-# endpoint).
+# endpoint). The exception is `survival_derived` — a value-added table
+# of re-derived OS / DSS / PFI / DFI endpoints (Liu et al. 2018 algorithm)
+# that doesn't correspond to a single GDC concept; provenance is in the
+# dataset card's "Survival endpoints" section.
 TABULAR_TABLES: dict[str, pa.Schema] = {
     "cases": pa.schema(TABULAR_CASES_FIELDS),
     "masked_somatic_mutation": pa.schema(TABULAR_MUTATIONS_FIELDS),
     "gene_expression_quantification": pa.schema(TABULAR_EXPRESSION_FIELDS),
     "files": pa.schema(TABULAR_FILES_FIELDS),
+    "survival_derived": pa.schema(TABULAR_SURVIVAL_DERIVED_FIELDS),
 }

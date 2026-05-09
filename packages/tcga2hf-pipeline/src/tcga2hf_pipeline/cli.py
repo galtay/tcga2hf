@@ -13,11 +13,13 @@ from tcga2hf.schema import TABULAR_TABLES
 from tcga2hf_pipeline import (
     cdr,
     clinical,
+    clinical_supplement,
     dataset_card,
     expression,
     genomic,
     hf_upload,
     mutations,
+    survival,
     tabular,
 )
 from tcga2hf_pipeline.gdc import GDCClient, write_cases_json
@@ -185,6 +187,44 @@ def fetch_expression_cmd(
     )
 
 
+@app.command("fetch-clinical-supplements")
+def fetch_clinical_supplements_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads BCR biotab Clinical Supplement files.",
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Download BCR biotab Clinical Supplement files (the original BCR forms).
+
+    These TSV files carry clinical fields the harmonized `/cases?expand=...`
+    API drops or under-populates — most importantly Liu et al. 2018's
+    `treatment_outcome_first_course`, the disease-free signal that drives
+    DFI re-derivation. Files land at `<data-dir>/raw/<project>/clinical_supplement/`.
+    """
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    typer.echo(f"raw dir: {raw_dir}")
+
+    with GDCClient() as client:
+        status = client.status()
+        typer.echo(f"GDC: {status.get('data_release', '<unknown>')} (tag {status.get('tag', '?')})")
+        for proj in project:
+            out_dir = raw_dir / proj / "clinical_supplement"
+            typer.echo(f"fetching Clinical Supplement biotabs for {proj} -> {out_dir}")
+            manifest = clinical_supplement.fetch_clinical_supplements(client, proj, out_dir)
+            n_dl = sum(1 for m in manifest if m["_status"] == "downloaded")
+            n_cache = sum(1 for m in manifest if m["_status"] == "cached")
+            kinds = sorted({m["form_kind"] for m in manifest})
+            typer.echo(
+                f"  {len(manifest):>3} files ({n_dl} downloaded, {n_cache} cached)  "
+                f"forms: {', '.join(kinds)}"
+            )
+
+
 @app.command("fetch-cdr")
 def fetch_cdr_cmd(
     data_dir: DataDirOpt = None,
@@ -212,7 +252,7 @@ def build_cmd(
     """Flatten raw clinical JSON into per-project patient Parquets + dataset card."""
     root = _resolve_data_dir(data_dir)
     raw_dir = root / "raw"
-    processed_dir = root / "processed"
+    processed_dir = root / "processed_patient"
     typer.echo(f"raw dir:       {raw_dir}")
     typer.echo(f"processed dir: {processed_dir}")
 
@@ -223,18 +263,11 @@ def build_cmd(
     if not project_files:
         raise typer.BadParameter(f"no cases.json files found under {raw_dir}.")
 
-    # Wipe the whole processed/ tree so removed projects + any legacy layout
-    # (e.g. the old patients/ directory) don't leave stale data behind.
+    # Wipe the whole processed_patient/ tree so removed projects + any legacy
+    # layout don't leave stale data behind.
     if processed_dir.exists():
         shutil.rmtree(processed_dir)
     processed_dir.mkdir(parents=True)
-
-    # CDR (Liu et al 2018 curated survival) is shared across all projects;
-    # load once at the top. If `fetch-cdr` hasn't been run, the index is
-    # empty and every patient row gets cdr_matched=False — the build
-    # still works.
-    cdr_index = cdr.load_cdr_index(raw_dir)
-    typer.echo(f"CDR rows indexed: {len(cdr_index)}")
 
     projects: list[str] = []
     gdc_releases: dict[str, str] = {}
@@ -251,18 +284,29 @@ def build_cmd(
             mutations.attach(rows, mut_by_case)
         if expr_by_case:
             expression.attach(rows, expr_by_case)
-        # Liu's CDR survival columns; populate even when cdr_index is
-        # empty so the parquet schema stays stable.
-        cdr.attach_cdr(rows, cdr_index)
+        # Attach BCR biotab Clinical Supplement data if it's been fetched.
+        # survival.attach_survival reads `row["clinical_supplement"]` for the
+        # ~2.4×-better-populated `treatment_outcome_first_course` field,
+        # which drives DFI re-derivation. Supplement data is consumed
+        # in-memory only; not serialized to the patients dataset.
+        supp_dir = path.parent / "clinical_supplement"
+        supps = clinical_supplement.load_supplements_for_project(supp_dir)
+        if supps:
+            clinical_supplement.attach_supplements(rows, supps)
+        # Re-derive OS / DSS / PFI / DFI from current GDC data using Liu
+        # et al. 2018's algorithm; results land in `survival_derived` struct.
+        # See `dev_research/liu_2018/report.html` for validation against
+        # Liu's curated 2018 CDR.
+        survival.attach_survival(rows)
 
         n_variants = sum(len(r["samples_masked_somatic_mutation"]) for r in rows)
         n_expr = sum(len(r["samples_gene_expression_quantification"]) for r in rows)
-        n_cdr = sum(1 for r in rows if r["cdr_matched"])
+        n_os = sum(1 for r in rows if (r.get("survival_derived") or {}).get("os_event") is not None)
         typer.echo(
             f"  {proj:<12} {len(rows):>4} patients  "
             f"mutations={n_variants:>5} ({len(mut_by_case)} MAFs)  "
             f"expression={n_expr:>4} aliquots ({len(expr_by_case)} TSVs)  "
-            f"cdr={n_cdr}/{len(rows)}"
+            f"os={n_os}/{len(rows)}"
         )
 
         out = clinical.write_patients(rows, processed_dir, proj)
@@ -275,7 +319,7 @@ def build_cmd(
 
     card = dataset_card.write_card(processed_dir, projects, gdc_releases=gdc_releases)
     typer.echo(f"wrote dataset card -> {card}")
-    typer.echo(f"done. processed tree at: {processed_dir}")
+    typer.echo(f"done. processed_patient tree at: {processed_dir}")
 
 
 @app.command("build-tabular")
@@ -324,9 +368,6 @@ def build_tabular_cmd(
         shutil.rmtree(processed_dir)
     processed_dir.mkdir(parents=True)
 
-    cdr_index = cdr.load_cdr_index(raw_dir)
-    typer.echo(f"CDR rows indexed: {len(cdr_index)}")
-
     projects: list[str] = []
     gdc_releases: dict[str, str] = {}
     for path in project_files:
@@ -334,17 +375,27 @@ def build_tabular_cmd(
         projects.append(proj)
         cases = json.loads(path.read_text())
         tables = tabular.build_tables(cases, path.parent)
-        # The `cases` table inherits the cdr_* placeholders from
-        # `clinical._patient_row`; populate them from CDR (no-op for
-        # cases not in Liu's 2018 freeze).
-        cdr.attach_cdr(tables["cases"], cdr_index)
+        # Re-derive survival endpoints (Liu et al. 2018 algorithm) — same
+        # in-memory enrichment the consolidated `build` does. Lands on
+        # `tables["cases"][i]["survival_derived"]`; tabular.write_tables
+        # then projects it into the standalone `survival_derived` table.
+        supp_dir = path.parent / "clinical_supplement"
+        supps = clinical_supplement.load_supplements_for_project(supp_dir)
+        if supps:
+            clinical_supplement.attach_supplements(tables["cases"], supps)
+        survival.attach_survival(tables["cases"])
+        # Project the derived survival values into the dedicated table.
+        tables["survival_derived"] = tabular.derived_survival_rows(tables["cases"])
 
         sizes = {name: len(rows) for name, rows in tables.items()}
         # Compact one-line summary of row counts per table — easier to spot
         # cardinality regressions than scrolling through 14 lines per project.
         summary = " ".join(f"{name}={n}" for name, n in sizes.items())
-        n_cdr = sum(1 for r in tables["cases"] if r["cdr_matched"])
-        typer.echo(f"  {proj:<12} {summary}  cdr={n_cdr}/{len(tables['cases'])}")
+        n_os = sum(
+            1 for r in tables["cases"]
+            if (r.get("survival_derived") or {}).get("os_event") is not None
+        )
+        typer.echo(f"  {proj:<12} {summary}  os={n_os}/{len(tables['cases'])}")
 
         out_paths = tabular.write_tables(tables, processed_dir, proj)
         # Use any one table's path to print the project's output dir.
@@ -355,10 +406,17 @@ def build_tabular_cmd(
             status = json.loads(status_path.read_text())
             gdc_releases[proj] = status.get("data_release", "<unknown>")
 
+    # Tables list combines the fixed-schema TABULAR_TABLES with the
+    # flex-schema clinical_supplement_* tables (one per BCR biotab form);
+    # _tabular_configs_yaml filters to (project, table) pairs that
+    # actually exist on disk.
+    all_tables = list(TABULAR_TABLES) + [
+        f"clinical_supplement_{kind}" for kind in clinical_supplement.TABULAR_FORM_KINDS
+    ]
     card = dataset_card.write_tabular_card(
         processed_dir,
         projects,
-        list(TABULAR_TABLES),
+        all_tables,
         gdc_releases=gdc_releases,
     )
     typer.echo(f"wrote dataset card -> {card}")
@@ -391,9 +449,9 @@ def upload_cmd(
     ] = None,
     data_dir: DataDirOpt = None,
 ) -> None:
-    """Push <data-dir>/processed/ to a HuggingFace dataset repo."""
+    """Push <data-dir>/processed_patient/ to a HuggingFace dataset repo."""
     root = _resolve_data_dir(data_dir)
-    processed_dir = root / "processed"
+    processed_dir = root / "processed_patient"
     visibility = "private" if private else "PUBLIC"
     typer.echo(f"processed dir: {processed_dir}")
     typer.echo(f"repo_id:       {repo_id} ({visibility})")

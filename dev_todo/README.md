@@ -6,5 +6,7 @@ when there's room.
 
 ## Contents
 
-(no open items — `optimize_downloads.md` resolved by switching
-`genomic.fetch_files` to GDC's bulk POST `/data` path.)
+- [`reproduce_validate_program.md`](reproduce_validate_program.md) — standing
+  practice of reproducing published TCGA pan-cancer results from raw data and
+  validating per-case agreement. Liu 2018 CDR wired in as the template;
+  Hoadley 2018 iClusters queued as the next target.

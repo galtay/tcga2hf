@@ -9,3 +9,6 @@ __pycache__/
 data/
 .DS_Store
 .claude/
+# Local-only build/iteration caches under dev_research/<paper>/.
+# Each paper's load_cohort.py rebuilds these on demand from raw GDC + CDR.
+_cache/

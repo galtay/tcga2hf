@@ -228,6 +228,15 @@ Exposure = _make_entity("Exposure", EXPOSURE_FIELDS)
 FamilyHistory = _make_entity("FamilyHistory", FAMILY_HISTORY_FIELDS)
 
 
+# Survival endpoints — re-derived from current GDC data using Liu et al. 2018's
+# algorithm. See `tcga2hf_pipeline.survival` and the validation report at
+# `dev_research/liu_2018/report.html` for methodology and per-endpoint
+# agreement rates against Liu's curated 2018 CDR.
+from tcga2hf.schema import SURVIVAL_DERIVED_FIELDS  # noqa: E402
+
+SurvivalDerived = _make_entity("SurvivalDerived", SURVIVAL_DERIVED_FIELDS)
+
+
 # ---------------------------------------------------------------------------
 # Molecular entities
 # ---------------------------------------------------------------------------
@@ -348,6 +357,7 @@ _TcgaHfPatientBase = _make_entity(
             list[GeneExpression],
             Field(default_factory=list),
         ),
+        "survival_derived": (SurvivalDerived | None, None),
     },
     required=("case_id", "case_submitter_id", "project_id"),
 )
@@ -360,6 +370,15 @@ class TcgaHfPatient(_TcgaHfPatientBase):
     Methods below provide common joins so users don't have to walk the
     nested biospecimen tree by hand.
     """
+
+    # BCR Clinical Supplement biotabs are kept as a flex `dict` rather than a
+    # typed entity because the BCR form columns vary by cancer type — we'd
+    # need a per-project pydantic class to type them strictly. The actual
+    # parquet column is a struct whose fields pyarrow infers per project;
+    # users navigate it with `patient.clinical_supplement["patient"]["..."]`
+    # etc. or by passing `model_config["extra"] = "allow"` if they want
+    # pydantic to track the per-project columns dynamically.
+    clinical_supplement: dict[str, Any] | None = None
 
     # ---- biospecimen joins ----
 
