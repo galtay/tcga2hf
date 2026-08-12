@@ -264,6 +264,7 @@ def _ssgsea_scores_rows(
     project_raw_dir: Path,
     collection: str,
     msigdb_dir: Path,
+    load_matrix: Any = None,
 ) -> list[dict[str, Any]]:
     """One row per (aliquot, pathway) of raw ssGSEA scores for one project.
 
@@ -276,7 +277,11 @@ def _ssgsea_scores_rows(
     gmt_path = msigdb_dir / _msigdb_mod.COLLECTIONS[collection].file_name
     if not gmt_path.exists():
         return []
-    genes, matrix, records = _expression_mod.tpm_matrix_for_project(project_raw_dir)
+    # Reading every STAR TSV dominates the cost, and the matrix is the same
+    # for every collection, so the caller passes a memoized loader rather
+    # than paying for it once per collection.
+    loader = load_matrix or (lambda: _expression_mod.tpm_matrix_for_project(project_raw_dir))
+    genes, matrix, records = loader()
     if not records:
         return []
 
@@ -314,6 +319,7 @@ def _ssgsea_scores_rows(
                 {
                     **common,
                     "pathway": name,
+                    "pathway_url": _msigdb_mod.geneset_url(name),
                     "matched_gene_count": int(by_name[name]["matched_gene_count"]),
                     "original_gene_count": int(by_name[name]["original_gene_count"]),
                     "score_raw": float(scores[i, j]),
@@ -505,9 +511,16 @@ def build_tables(
     # scores exist (see `ssgsea_stats_rows`), so they start empty here for
     # the same reason `survival_derived` does.
     msigdb = msigdb_dir if msigdb_dir is not None else project_raw_dir.parent / "msigdb"
+    _matrix_cache: list[Any] = []
+
+    def _matrix():
+        if not _matrix_cache:
+            _matrix_cache.append(_expression_mod.tpm_matrix_for_project(project_raw_dir))
+        return _matrix_cache[0]
+
     for coll in SSGSEA_COLLECTIONS:
         thunks[_schema_mod.ssgsea_scores_table(coll)] = (
-            lambda c=coll: _ssgsea_scores_rows(cases, project_raw_dir, c, msigdb)
+            lambda c=coll: _ssgsea_scores_rows(cases, project_raw_dir, c, msigdb, _matrix)
         )
         thunks[_schema_mod.ssgsea_stats_table(coll)] = list
 

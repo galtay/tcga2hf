@@ -170,6 +170,7 @@ _TABULAR_VIEW_MAPPING = """\
 | Gene Expression Quantification | `gene_expression_quantification` table — one row per (aliquot, gene); `stranded_first` / `stranded_second` dropped (GDC harmonizes as unstranded) |
 | BCR Clinical Supplements | `clinical_supplement_*` tables — one per BCR form (patient, follow_up, nte, drug, radiation, ablation, omf) |
 | Pathology Reports | `pathology_report` table — one row per report, with the scanned PDF verbatim in `pdf_bytes` |
+| MSigDB gene sets + RNA-Seq | `ssgsea_scores_*` / `ssgsea_stats_*` tables — pathway activity per aliquot; see the ssGSEA section below |
 | Per-modality manifests | `files` table — one row per (file, case) with `file_id` / `md5sum` / `data_type` / size; useful for joining a row back to its source file or replaying a specific modality fetch |
 """
 
@@ -291,6 +292,9 @@ luad_muts = load_dataset(
 # GDC references / License / Disclaimer (all shared)
 # ===========================================================================
 
+
+_MSIGDB_COLLECTION_URL = "https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp"
+_MSIGDB_LICENCE_URL = "https://www.gsea-msigdb.org/gsea/msigdb_license_terms.jsp"
 
 _GDC_REFERENCES = """\
 ## GDC references
@@ -478,6 +482,99 @@ def _tabular_configs_yaml(
 
 
 # ===========================================================================
+# ssGSEA pathway activity (tabular view only)
+# ===========================================================================
+
+
+def _ssgsea_section() -> str:
+    """Section describing the ssGSEA tables, with links to every collection.
+
+    Templated from `msigdb.COLLECTIONS` so the documented collections and
+    md5s cannot drift from what the pipeline actually fetches.
+    """
+    from tcga2hf.schema import SSGSEA_COLLECTIONS
+
+    from tcga2hf_pipeline import msigdb as _msigdb
+
+    rows = []
+    for key in SSGSEA_COLLECTIONS:
+        c = _msigdb.COLLECTIONS[key]
+        rows.append(
+            f"| [`{key}`]({_MSIGDB_COLLECTION_URL}) | {c.description} | "
+            f"`{c.file_name}` | `{c.md5}` |"
+        )
+    table = "\n".join(rows)
+    return f"""\
+## Pathway activity (ssGSEA)
+
+Single-sample gene set enrichment scores for every RNA-Seq aliquot, one
+`ssgsea_scores_<collection>` table per MSigDB collection plus a matching
+`ssgsea_stats_<collection>` table of reference distributions.
+
+Every row carries `pathway_url`, linking to the authoritative MSigDB
+definition of that gene set — so what a score means is one click away
+from the score itself.
+
+### Collections
+
+Pinned to MSigDB **{_msigdb.MSIGDB_VERSION}** and verified by md5, because
+gene-set membership changes between MSigDB releases and feeds directly
+into every score.
+
+| collection | contents | file | md5 |
+|---|---|---|---|
+{table}
+
+MSigDB is released under CC BY 4.0; some constituent collections carry
+extra restrictions, so we ship only collections we can redistribute
+scores from. See the [MSigDB licence terms]({_MSIGDB_LICENCE_URL}).
+
+### Method
+
+Barbie et al. (2009) ssGSEA as implemented by Bioconductor GSVA,
+transcribed to Python and validated against GSVA 2.6.6 to floating-point
+noise (Pearson/Spearman 1.0000000000, max relative difference 4.8e-13).
+`alpha=0.25`, gene sets filtered to a minimum of 10 genes **after**
+mapping onto the expression matrix; no maximum size.
+
+Scored on `tpm_unstranded` over a gene universe of protein-coding genes
+plus the functional immunoglobulin / T-cell-receptor segments. That last
+inclusion matters for tumour-immune biology: GENCODE gives Ig/TCR
+segments their own biotypes, and without them MSigDB's B-cell-receptor
+and complement pathways match as little as 8% of their genes. Note that
+V/D/J segments are somatically rearranged, so their expression reports
+lymphocyte infiltration rather than regulation of a fixed locus.
+
+Because ssGSEA weights **ranks** rather than expression values, any
+strictly monotonic transform of the input leaves scores unchanged — there
+is no reason to log-transform before scoring.
+
+### Why `score_raw`, and how to normalize
+
+`score_raw` is the only score column, and it is a property of its own
+sample: it does not depend on which other samples or gene sets were
+scored alongside it. GSVA's optional normalization divides by the range
+of the entire score matrix, which would make every value depend on cohort
+and collection composition — adding Reactome to a Hallmark run widens
+that divisor by ~49% on this data, silently restating previously
+published scores.
+
+The `ssgsea_stats_*` tables carry that composition-dependent information
+instead. Each project ships its own reference distributions **and** the
+pan-cancer ones, so you can normalize without scanning every config:
+
+- **GSVA-equivalent normalization**: divide by
+  `MAX(max) - MIN(min)` over the `pan_cancer` rows.
+- **z-score against a reference population**: `(score_raw - mean) / sd`
+  for the `population` and `sample_type` you care about.
+
+Everything in `ssgsea_stats_*` is derivable from `ssgsea_scores_*` by
+aggregation; it is a materialized convenience view, not independent
+evidence.
+"""
+
+
+# ===========================================================================
 # Per-view writers — choose configs YAML, header, loading; body identical order
 # ===========================================================================
 
@@ -560,6 +657,8 @@ tags:
             _header(consolidated=False, timestamp=timestamp, release_md=release_md),
             _data_model(consolidated=False),
             _shared_survival_endpoints(consolidated=False),
+            # ssGSEA is tabular-only; the consolidated card omits it.
+            _ssgsea_section(),
             _TABULAR_LOADING,
             _GDC_REFERENCES,
             _LICENSE_AND_REDISTRIBUTION,

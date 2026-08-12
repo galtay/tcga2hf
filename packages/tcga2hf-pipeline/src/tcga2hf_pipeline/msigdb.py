@@ -67,6 +67,29 @@ COLLECTIONS: dict[str, Collection] = {
         md5="1516b5d15611415d1996c92b7cb6d1cc",
         description="MSigDB C2:CP:REACTOME — 1,839 canonical pathways",
     ),
+    "pid": Collection(
+        key="pid",
+        stem="c2.cp.pid",
+        md5="291508046f73d82d13e5efb47492fa47",
+        description="MSigDB C2:CP:PID — 196 NCI-Nature cancer signalling pathways",
+    ),
+    "oncogenic": Collection(
+        key="oncogenic",
+        stem="c6.all",
+        md5="aba0e2214ff63327ae3fb0ce4bcd11c2",
+        description="MSigDB C6 — 189 oncogenic signatures (oncogene / tumour-suppressor perturbation)",
+    ),
+    "cancer_cell_atlas": Collection(
+        key="cancer_cell_atlas",
+        stem="c4.3ca",
+        md5="ff9902288655ff2ab88fcb5cbc4a95dd",
+        description="MSigDB C4:3CA — 148 Curated Cancer Cell Atlas meta-programs (single-cell derived)",
+    ),
+    # Fetchable and pinned, but deliberately not in SSGSEA_COLLECTIONS: its
+    # weakest sets are miRNA-centric and TCGA's poly-A RNA-Seq leaves miRNAs
+    # 94.8% exactly zero, so 49 of its sets would score something other than
+    # what their names claim. Revisit once the separate miRNA-Seq assay is in
+    # the dataset, and re-measure rather than assume.
     "wikipathways": Collection(
         key="wikipathways",
         stem="c2.cp.wikipathways",
@@ -74,6 +97,17 @@ COLLECTIONS: dict[str, Collection] = {
         description="MSigDB C2:CP:WIKIPATHWAYS — 925 community-curated pathways",
     ),
 }
+
+# Every MSigDB gene set has a definition page at a URL derivable from its
+# name — verified across all 26,937 pathways in the collections above. We
+# template it onto each row rather than parsing the GMT's second field, the
+# same way `gdc_portal_url` is templated from `case_id`, so the HF viewer
+# renders a clickable link to the authoritative definition.
+GENESET_URL_PREFIX = "https://www.gsea-msigdb.org/gsea/msigdb/human/geneset/"
+
+
+def geneset_url(pathway: str) -> str:
+    return f"{GENESET_URL_PREFIX}{pathway}"
 
 
 def md5_of(path: Path, chunk: int = 1 << 16) -> str:

@@ -920,7 +920,15 @@ TABULAR_PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
 # later, and still yield the normalized view on demand — the divisor is
 # recoverable from the stats table as MAX(max) - MIN(min) over its
 # `pan_cancer` rows.
-SSGSEA_COLLECTIONS: list[str] = ["hallmark"]
+# WikiPathways is deliberately absent: its weak sets are miRNA-centric and
+# this assay cannot measure miRNAs. See `tcga2hf_pipeline.msigdb`.
+SSGSEA_COLLECTIONS: list[str] = [
+    "hallmark",
+    "reactome",
+    "pid",
+    "oncogenic",
+    "cancer_cell_atlas",
+]
 
 TABULAR_SSGSEA_SCORES_FIELDS: list[pa.Field] = [
     *_CASE_FKS,
@@ -933,6 +941,12 @@ TABULAR_SSGSEA_SCORES_FIELDS: list[pa.Field] = [
     *_ALIQUOT_FKS,
     pa.field("source_file_id", pa.string()),
     pa.field("pathway", pa.string()),
+    # Link to the authoritative MSigDB definition of this gene set, so a
+    # consumer can check what a score actually means without leaving the
+    # table. Templated from the pathway name (same pattern as
+    # `gdc_portal_url`); verified derivable for all 26,937 pathways across
+    # the collections we ship.
+    pa.field("pathway_url", pa.string()),
     # Per-pathway provenance. Constant within a pathway, so dictionary
     # encoding makes it ~1% of the table, and it lets a consumer filter on
     # gene-set coverage without a join.
