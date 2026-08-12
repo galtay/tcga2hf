@@ -11,10 +11,13 @@ versions), and gene-set membership feeds straight into every score. A
 dataset that says "ssGSEA of Hallmark" without naming the release is not
 reproducible.
 
-Only the collections we can redistribute scores from are listed. MSigDB is
+Only collections we can redistribute scores from are listed. MSigDB is
 CC BY 4.0, but some constituent collections carry extra restrictions —
-notably the KEGG-derived sets — so we stay with Hallmark, Reactome and
-WikiPathways.
+notably the KEGG-derived sets — which are therefore absent.
+
+Which of the listed collections are actually scored is `SSGSEA_COLLECTIONS`
+in `tcga2hf.schema`, not this dict: WikiPathways is fetchable and pinned
+here but deliberately not scored (see its entry below).
 
 Reference: https://www.gsea-msigdb.org/gsea/msigdb
 License terms: https://www.gsea-msigdb.org/gsea/msigdb_license_terms.jsp
@@ -50,10 +53,12 @@ class Collection:
         return f"{_BASE_URL}/{MSIGDB_VERSION}/{self.file_name}"
 
 
-# md5s are of the 2026-08 snapshots we validated against. Hallmark is the
-# v1 collection; Reactome is listed because it is the planned v2 addition
-# and its size distribution is what makes the ssGSEA normalization
-# divisor unstable (see `ssgsea.normalize_global`).
+# md5s are of the 2026-08 snapshots we validated against. The scored set
+# was chosen by measuring gene coverage against our expression universe
+# across 14 candidate collections rather than by reputation — all five
+# exceed a 0.97 mean match fraction, while well-curated collections like
+# C3:TFT (0.77) and C1 positional (0.39) were rejected because their genes
+# largely fall outside a coding-gene matrix. See `dev_todo/ssGSEA.md`.
 COLLECTIONS: dict[str, Collection] = {
     "hallmark": Collection(
         key="hallmark",
