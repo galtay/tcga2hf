@@ -108,21 +108,33 @@ def ssgsea_scores(
         if gs.size and (gs.min() < 0 or gs.max() >= n_genes):
             raise ValueError(f"gene_sets[{i}] has indices outside the expression matrix")
 
+    # Closed form of sum(walkStat), which is what GSVA itself evaluates.
+    # Writing p for a gene's 1-based position in the descending-rank order,
+    # w for its weight, and summing the two step CDFs over all k:
+    #
+    #   ES = sum_{p in set} w_p * (n - p + 1) / sum_{p in set} w_p
+    #        - (n(n+1)/2 - sum_{p in set} (n - p + 1)) / (n - |set|)
+    #
+    # The out-of-set half telescopes into the total, so every term depends
+    # only on the set's own members. That makes each gene set O(|set|)
+    # rather than O(n_genes) -- the difference between minutes and hours
+    # once a 1,450-set collection like Reactome is in play.
+    total_positions = n_genes * (n_genes + 1) / 2.0
     out = np.empty((len(gene_sets), n_samples), dtype=np.float64)
     for j in range(n_samples):
         ranks = _sample_ranks(expression[:, j])
         # Descending rank; stable so tied genes keep matrix order, matching
         # R's `order()`, which is stable for the integer ranks GSVA passes it.
         order = np.argsort(-ranks, kind="stable")
-        weighted = np.abs(ranks[order]).astype(np.float64) ** alpha
+        position = np.empty(n_genes, dtype=np.float64)
+        position[order] = np.arange(1, n_genes + 1)
+        weight = np.abs(ranks).astype(np.float64) ** alpha
         for i, gs in enumerate(gene_sets):
-            in_set = np.zeros(n_genes, dtype=bool)
-            in_set[gs] = True
-            in_ordered = in_set[order]
-            inside = weighted * in_ordered
-            step_in = np.cumsum(inside) / inside.sum()
-            step_out = np.cumsum(~in_ordered) / (~in_ordered).sum()
-            out[i, j] = (step_in - step_out).sum()
+            tail = n_genes - position[gs] + 1.0  # (n - p + 1) per member
+            w = weight[gs]
+            out[i, j] = (w * tail).sum() / w.sum() - (
+                total_positions - tail.sum()
+            ) / (n_genes - gs.size)
     return out
 
 
