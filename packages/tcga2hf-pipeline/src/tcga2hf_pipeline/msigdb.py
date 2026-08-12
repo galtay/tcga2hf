@@ -64,8 +64,14 @@ COLLECTIONS: dict[str, Collection] = {
     "reactome": Collection(
         key="reactome",
         stem="c2.cp.reactome",
-        md5="",  # not yet pinned; fetch with verify=False to record one
-        description="MSigDB C2:CP:REACTOME canonical pathways",
+        md5="1516b5d15611415d1996c92b7cb6d1cc",
+        description="MSigDB C2:CP:REACTOME — 1,839 canonical pathways",
+    ),
+    "wikipathways": Collection(
+        key="wikipathways",
+        stem="c2.cp.wikipathways",
+        md5="8e8a38972816a3997a557d6dd625138a",
+        description="MSigDB C2:CP:WIKIPATHWAYS — 925 community-curated pathways",
     ),
 }
 

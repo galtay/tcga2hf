@@ -126,6 +126,35 @@ def _card_inputs(
     return projects, gdc_releases
 
 
+def _write_ssgsea_stats(processed_dir: Path, only: set[str] | None) -> None:
+    """Build each ssGSEA collection's stats table from the written scores.
+
+    Skipped for collections whose stats table wasn't requested, and a no-op
+    when no project has scores on disk yet.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from tcga2hf.schema import SSGSEA_COLLECTIONS, TABULAR_TABLES, ssgsea_stats_table
+
+    for coll in SSGSEA_COLLECTIONS:
+        table_name = ssgsea_stats_table(coll)
+        if only is not None and table_name not in only:
+            continue
+        by_project = tabular.ssgsea_stats_rows(processed_dir, coll)
+        if not by_project:
+            continue
+        for proj, rows in by_project.items():
+            out_path = processed_dir / proj / table_name / "data.parquet"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.Table.from_pylist(rows, schema=TABULAR_TABLES[table_name]),
+                out_path,
+                write_page_index=True,
+            )
+        n = sum(len(r) for r in by_project.values())
+        typer.echo(f"  {table_name}: {n:,} rows across {len(by_project)} projects")
+
+
 def _select_projects(raw_dir: Path, project: list[str] | None) -> list[Path]:
     """Resolve `--project` to the cases.json paths to process (all if None)."""
     project_files = sorted(raw_dir.glob("*/cases.json"))
@@ -560,6 +589,12 @@ def build_tabular_cmd(
         # flex-schema one with no rows (nothing is written for those).
         if out_paths:
             typer.echo(f"             -> {next(iter(out_paths.values())).parent.parent}")
+
+    # ssGSEA reference distributions are cohort-level, so they can only be
+    # built once every project's scores are on disk. Reading them back from
+    # the written parquets (rather than from memory) is what guarantees the
+    # published stats describe the published scores.
+    _write_ssgsea_stats(processed_dir, only)
 
     projects, gdc_releases = _card_inputs(raw_dir, processed_dir, "*/data.parquet")
 

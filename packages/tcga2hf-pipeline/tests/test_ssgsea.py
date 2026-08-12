@@ -191,3 +191,118 @@ def test_ssgsea_rejects_out_of_range_indices() -> None:
     expr = np.arange(20, dtype=np.float64).reshape(10, 2)
     with pytest.raises(ValueError, match="outside the expression matrix"):
         ssgsea.ssgsea_scores(expr, [np.array([0, 99])])
+
+
+# ---------------------------------------------------------------------------
+# Tabular emitters
+# ---------------------------------------------------------------------------
+
+
+def test_stats_rows_carry_project_and_pan_cancer(tmp_path: Path) -> None:
+    """Each project's stats must include the pan-cancer reference too.
+
+    That duplication is the point: a consumer who loads one project's config
+    can still z-score against all of TCGA without scanning 33 of them.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from tcga2hf.schema import TABULAR_TABLES
+    from tcga2hf_pipeline import tabular
+
+    def _write(proj: str, scores: list[float], sample_types: list[str]) -> None:
+        rows = [
+            {
+                "case_id": f"c{i}", "case_submitter_id": f"C{i}", "sample_id": f"s{i}",
+                "sample_submitter_id": f"S{i}", "sample_type": st, "aliquot_id": f"a{i}",
+                "aliquot_submitter_id": f"A{i}", "source_file_id": f"f{i}",
+                "pathway": "P1", "matched_gene_count": 10, "original_gene_count": 12,
+                "score_raw": v,
+            }
+            for i, (v, st) in enumerate(zip(scores, sample_types, strict=True))
+        ]
+        out = tmp_path / proj / "ssgsea_scores_hallmark" / "data.parquet"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.Table.from_pylist(rows, schema=TABULAR_TABLES["ssgsea_scores_hallmark"]), out
+        )
+
+    _write("TCGA-AA", [1.0, 3.0], ["Primary Tumor", "Solid Tissue Normal"])
+    _write("TCGA-BB", [5.0, 7.0], ["Primary Tumor", "Primary Tumor"])
+
+    by_project = tabular.ssgsea_stats_rows(tmp_path, "hallmark")
+    assert set(by_project) == {"TCGA-AA", "TCGA-BB"}
+
+    aa = by_project["TCGA-AA"]
+    pan = [r for r in aa if r["population"] == "pan_cancer" and r["sample_type"] is None]
+    own = [r for r in aa if r["population"] == "project" and r["sample_type"] is None]
+    assert len(pan) == 1 and len(own) == 1
+    # pan-cancer spans both projects; the project row sees only its own.
+    assert pan[0]["n_aliquots"] == 4 and pan[0]["mean"] == pytest.approx(4.0)
+    assert own[0]["n_aliquots"] == 2 and own[0]["mean"] == pytest.approx(2.0)
+    assert own[0]["project_id"] == "TCGA-AA" and pan[0]["project_id"] is None
+    # Both projects must carry byte-equal pan-cancer rows.
+    assert pan == [r for r in by_project["TCGA-BB"] if r["population"] == "pan_cancer"
+                   and r["sample_type"] is None]
+
+
+def test_stats_expose_the_gsva_divisor(tmp_path: Path) -> None:
+    """MAX(max) - MIN(min) over pan_cancer rows must equal GSVA's divisor.
+
+    This is what lets us publish raw scores only: the normalized view stays
+    recoverable from the dataset itself rather than from prose in the card.
+    """
+    import numpy as np
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from tcga2hf.schema import TABULAR_TABLES
+    from tcga2hf_pipeline import tabular
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(20):
+        for p in ("P1", "P2"):
+            rows.append({
+                "case_id": f"c{i}", "case_submitter_id": None, "sample_id": None,
+                "sample_submitter_id": None, "sample_type": "Primary Tumor",
+                "aliquot_id": f"a{i}", "aliquot_submitter_id": None, "source_file_id": None,
+                "pathway": p, "matched_gene_count": 10, "original_gene_count": 10,
+                "score_raw": float(rng.normal(0, 100)),
+            })
+    out = tmp_path / "TCGA-XX" / "ssgsea_scores_hallmark" / "data.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=TABULAR_TABLES["ssgsea_scores_hallmark"]), out)
+
+    raw = np.array([r["score_raw"] for r in rows])
+    _, expected = ssgsea.normalize_global(raw.reshape(2, -1))
+
+    stats = tabular.ssgsea_stats_rows(tmp_path, "hallmark")["TCGA-XX"]
+    pan = [r for r in stats if r["population"] == "pan_cancer" and r["sample_type"] is None]
+    assert max(r["max"] for r in pan) - min(r["min"] for r in pan) == pytest.approx(expected)
+
+
+def test_stats_sd_is_null_for_single_observation(tmp_path: Path) -> None:
+    """ddof=1 is undefined at n=1; emit null rather than a misleading 0.0."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from tcga2hf.schema import TABULAR_TABLES
+    from tcga2hf_pipeline import tabular
+
+    rows = [{
+        "case_id": "c", "case_submitter_id": None, "sample_id": None,
+        "sample_submitter_id": None, "sample_type": "Primary Tumor", "aliquot_id": "a",
+        "aliquot_submitter_id": None, "source_file_id": None, "pathway": "P1",
+        "matched_gene_count": 10, "original_gene_count": 10, "score_raw": 1.0,
+    }]
+    out = tmp_path / "TCGA-XX" / "ssgsea_scores_hallmark" / "data.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows, schema=TABULAR_TABLES["ssgsea_scores_hallmark"]), out)
+
+    stats = tabular.ssgsea_stats_rows(tmp_path, "hallmark")["TCGA-XX"]
+    assert all(r["sd"] is None for r in stats)
+    assert all(r["n_aliquots"] == 1 for r in stats)
+
+
+def test_stats_rows_absent_when_no_scores(tmp_path: Path) -> None:
+    from tcga2hf_pipeline import tabular
+
+    assert tabular.ssgsea_stats_rows(tmp_path, "hallmark") == {}

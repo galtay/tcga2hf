@@ -22,6 +22,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 _QC_NAMES = ["N_unmapped", "N_multimapping", "N_noFeature", "N_ambiguous"]
@@ -141,6 +142,65 @@ def load_for_project(project_raw_dir: Path) -> dict[str, list[dict[str, Any]]]:
         )
         by_case[case_id].append(record)
     return dict(by_case)
+
+
+def tpm_matrix_for_project(
+    project_raw_dir: Path,
+) -> tuple[list[str], np.ndarray, list[dict[str, Any]]]:
+    """Return `(gene_symbols, tpm_matrix, aliquot_records)` for ssGSEA scoring.
+
+    The matrix is genes x aliquots of `tpm_unstranded`, restricted to
+    **protein-coding** genes with the `_PAR_Y` duplicates dropped. Both are
+    load-bearing choices rather than tidying: ssGSEA ranks genes *within the
+    supplied matrix*, so the gene universe changes every score. The ~40k
+    lncRNA / pseudogene rows are mostly zero and would dominate the low
+    ranks; the `_PAR_Y` entries are duplicate annotations of the X copy that
+    GDC's STAR pipeline leaves at exactly 0.0, so dropping them is lossless
+    and resolves all but a handful of duplicate symbols. Those few remaining
+    duplicates are collapsed by max TPM.
+
+    All GDC STAR files share one gene model (GENCODE v36) regardless of the
+    release they first appeared in, so a single gene index is valid across
+    the whole cohort; the ordering here comes from the first file read and
+    every other file is reindexed onto it.
+
+    Files whose manifest entry doesn't resolve to exactly one case and one
+    aliquot are skipped, matching `load_for_project`.
+    """
+    expr_dir = project_raw_dir / "expression"
+    manifest_path = expr_dir / "manifest.json"
+    if not manifest_path.exists():
+        return [], np.empty((0, 0), dtype=np.float32), []
+
+    entries = []
+    for entry in json.loads(manifest_path.read_text()):
+        file_path = expr_dir / entry["file_name"]
+        if not file_path.exists():
+            continue
+        case_id, aliquot_id = _file_aliquot_and_case(entry)
+        if not case_id or not aliquot_id:
+            continue
+        entries.append((file_path, case_id, aliquot_id, entry["file_id"]))
+    if not entries:
+        return [], np.empty((0, 0), dtype=np.float32), []
+
+    cols = ["gene_id", "gene_name", "gene_type", "tpm_unstranded"]
+    gene_index: pd.Index | None = None
+    matrix: np.ndarray | None = None
+    records: list[dict[str, Any]] = []
+    for i, (file_path, case_id, aliquot_id, source_file_id) in enumerate(entries):
+        df = pd.read_csv(file_path, sep="\t", comment="#", low_memory=False, usecols=cols)
+        df = df[(df["gene_type"] == "protein_coding") & (~df["gene_id"].str.contains("PAR_Y"))]
+        series = df.groupby("gene_name")["tpm_unstranded"].max()
+        if gene_index is None:
+            gene_index = series.index
+            matrix = np.empty((len(gene_index), len(entries)), dtype=np.float32)
+        matrix[:, i] = series.reindex(gene_index).to_numpy(dtype=np.float32)
+        records.append(
+            {"case_id": case_id, "aliquot_id": aliquot_id, "source_file_id": source_file_id}
+        )
+    assert gene_index is not None and matrix is not None
+    return list(gene_index), matrix, records
 
 
 def attach(

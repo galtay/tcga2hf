@@ -19,6 +19,12 @@ splits each project into four tables, named after stable GDC concepts:
                                        the document bytes verbatim, no
                                        text extraction (see
                                        `tcga2hf_pipeline.pathology`)
+  - `ssgsea_scores_<collection>`       one row per (aliquot, pathway) of
+                                       raw ssGSEA pathway activity, one
+                                       table per MSigDB collection
+  - `ssgsea_stats_<collection>`        reference distributions for those
+                                       scores (this project + pan-cancer),
+                                       written after every project scores
   - `files`                            one row per (file, case) from the
                                        per-modality manifests
 
@@ -38,14 +44,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
-from tcga2hf.schema import TABULAR_CASES_FIELDS, TABULAR_TABLES
+from tcga2hf import schema as _schema_mod
+from tcga2hf.schema import SSGSEA_COLLECTIONS, TABULAR_CASES_FIELDS, TABULAR_TABLES
 
 from tcga2hf_pipeline import clinical as _clinical_mod
 from tcga2hf_pipeline import clinical_supplement as _clinical_supplement_mod
 from tcga2hf_pipeline import expression as _expression_mod
+from tcga2hf_pipeline import msigdb as _msigdb_mod
 from tcga2hf_pipeline import mutations as _mutations_mod
 from tcga2hf_pipeline import pathology as _pathology_mod
+from tcga2hf_pipeline import ssgsea as _ssgsea_mod
 
 # Names of `cases` table columns, used to re-shape patient rows. Excludes
 # the two molecular-vector columns that the consolidated row carries (they
@@ -245,6 +255,147 @@ def _pathology_report_rows(
 
 
 # ---------------------------------------------------------------------------
+# ssGSEA pathway activity
+# ---------------------------------------------------------------------------
+
+
+def _ssgsea_scores_rows(
+    cases: list[dict[str, Any]],
+    project_raw_dir: Path,
+    collection: str,
+    msigdb_dir: Path,
+) -> list[dict[str, Any]]:
+    """One row per (aliquot, pathway) of raw ssGSEA scores for one project.
+
+    Depends on nothing outside this project: raw scores are a function of a
+    sample's own expression, the gene universe and the gene set. That is
+    what lets pathway activity be built inside the ordinary per-project
+    loop; the cohort-level reference distributions are a separate pass (see
+    `ssgsea_stats_rows`).
+    """
+    gmt_path = msigdb_dir / _msigdb_mod.COLLECTIONS[collection].file_name
+    if not gmt_path.exists():
+        return []
+    genes, matrix, records = _expression_mod.tpm_matrix_for_project(project_raw_dir)
+    if not records:
+        return []
+
+    kept, stats = _ssgsea_mod.map_gene_sets(_ssgsea_mod.load_gmt(gmt_path), genes)
+    if not kept:
+        return []
+    names = list(kept)
+    by_name = {s["pathway"]: s for s in stats}
+    scores = _ssgsea_mod.ssgsea_scores(matrix.astype(np.float64), [kept[n] for n in names])
+
+    case_index = {c.get("case_id"): c for c in cases}
+    rows: list[dict[str, Any]] = []
+    for j, rec in enumerate(records):
+        case = case_index.get(rec["case_id"])
+        if case is None:
+            continue
+        a2s = _aliquot_to_sample(case)
+        a2sub = _aliquot_to_submitter(case)
+        sample_id = a2s.get(rec["aliquot_id"])
+        sample = next(
+            (s for s in (case.get("samples") or []) if s.get("sample_id") == sample_id), {}
+        )
+        common = {
+            "case_id": rec["case_id"],
+            "case_submitter_id": case.get("submitter_id"),
+            "sample_id": sample_id,
+            "sample_submitter_id": sample.get("submitter_id"),
+            "sample_type": sample.get("sample_type"),
+            "aliquot_id": rec["aliquot_id"],
+            "aliquot_submitter_id": a2sub.get(rec["aliquot_id"]),
+            "source_file_id": rec["source_file_id"],
+        }
+        for i, name in enumerate(names):
+            rows.append(
+                {
+                    **common,
+                    "pathway": name,
+                    "matched_gene_count": int(by_name[name]["matched_gene_count"]),
+                    "original_gene_count": int(by_name[name]["original_gene_count"]),
+                    "score_raw": float(scores[i, j]),
+                }
+            )
+    return rows
+
+
+def _describe(series: pd.Series) -> dict[str, Any]:
+    """Reference distribution for one (population, pathway) cell."""
+    n = int(series.size)
+    return {
+        "n_aliquots": n,
+        "mean": float(series.mean()),
+        # ddof=1 is undefined for a single observation; emit null rather
+        # than a misleading 0.0.
+        "sd": float(series.std(ddof=1)) if n > 1 else None,
+        "min": float(series.min()),
+        "q25": float(series.quantile(0.25)),
+        "median": float(series.median()),
+        "q75": float(series.quantile(0.75)),
+        "max": float(series.max()),
+    }
+
+
+def ssgsea_stats_rows(
+    processed_dir: Path,
+    collection: str,
+    sample_types: tuple[str, ...] = ("Primary Tumor",),
+) -> dict[str, list[dict[str, Any]]]:
+    """Reference distributions per project, computed from the written scores.
+
+    Returns `{project_id: rows}`. Every project's rows carry that project's
+    own distributions **and** the pan-cancer ones, so a consumer who loads a
+    single project can still normalize against all of TCGA without scanning
+    every config.
+
+    This reads the `ssgsea_scores_*` parquets rather than rescoring: the
+    stats are pure aggregates of published values, and computing them from
+    the published bytes is the strongest guarantee that they agree. It also
+    means `--table ssgsea_stats_<collection>` can refresh them alone.
+
+    Everything here is composition-dependent — adding a project changes the
+    pan-cancer rows — which is precisely why it lives in this small table
+    instead of as extra columns on the immutable scores.
+    """
+    import pyarrow.parquet as pq
+
+    table_name = _schema_mod.ssgsea_scores_table(collection)
+    frames: dict[str, pd.DataFrame] = {}
+    for path in sorted(processed_dir.glob(f"*/{table_name}/data.parquet")):
+        df = pq.read_table(
+            path, columns=["pathway", "sample_type", "score_raw"]
+        ).to_pandas()
+        if len(df):
+            frames[path.parent.parent.name] = df
+    if not frames:
+        return {}
+
+    def _rows_for(df: pd.DataFrame, population: str, project_id: str | None) -> list[dict]:
+        out = []
+        for sample_type in (None, *sample_types):
+            sub = df if sample_type is None else df[df["sample_type"] == sample_type]
+            if not len(sub):
+                continue
+            for pathway, series in sub.groupby("pathway")["score_raw"]:
+                out.append(
+                    {
+                        "population": population,
+                        "project_id": project_id,
+                        "sample_type": sample_type,
+                        "pathway": pathway,
+                        **_describe(series),
+                    }
+                )
+        return out
+
+    pan = _rows_for(pd.concat(frames.values(), ignore_index=True), "pan_cancer", None)
+    return {proj: _rows_for(df, "project", proj) + pan for proj, df in frames.items()}
+
+
+# ---------------------------------------------------------------------------
 # Files (provenance from per-modality manifests)
 # ---------------------------------------------------------------------------
 
@@ -308,6 +459,7 @@ def build_tables(
     cases: list[dict[str, Any]],
     project_raw_dir: Path,
     only: set[str] | None = None,
+    msigdb_dir: Path | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Build tabular tables for one project (all of them unless `only` is given).
 
@@ -348,6 +500,16 @@ def build_tables(
         "survival_derived": list,
         "pathology_report": lambda: _pathology_report_rows(cases, project_raw_dir),
     }
+    # ssGSEA scores are per-project pure; the matching stats tables are a
+    # cohort-level aggregate written by the caller after every project's
+    # scores exist (see `ssgsea_stats_rows`), so they start empty here for
+    # the same reason `survival_derived` does.
+    msigdb = msigdb_dir if msigdb_dir is not None else project_raw_dir.parent / "msigdb"
+    for coll in SSGSEA_COLLECTIONS:
+        thunks[_schema_mod.ssgsea_scores_table(coll)] = (
+            lambda c=coll: _ssgsea_scores_rows(cases, project_raw_dir, c, msigdb)
+        )
+        thunks[_schema_mod.ssgsea_stats_table(coll)] = list
 
     wanted = set(thunks) if only is None else set(only)
     # survival_derived is projected off the cases rows, so it drags `cases`
@@ -405,6 +567,10 @@ def derived_survival_rows(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
 _ROW_GROUP_SIZE_DEFAULT = 50
 _ROW_GROUP_SIZE_BY_TABLE: dict[str, int] = {
     "gene_expression_quantification": 100_000,
+    # ssGSEA scores are the same shape as expression -- narrow rows, very
+    # many of them (575k per project for Hallmark, ~17M for a Reactome-sized
+    # collection) -- so they get the same row-group treatment.
+    **{f"ssgsea_scores_{c}": 100_000 for c in SSGSEA_COLLECTIONS},
 }
 
 

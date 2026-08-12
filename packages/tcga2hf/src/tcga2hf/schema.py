@@ -906,6 +906,75 @@ TABULAR_PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
 ]
 
 
+# ssGSEA pathway activity. Two tables per gene-set collection, named
+# `ssgsea_scores_<collection>` and `ssgsea_stats_<collection>` — grouping by
+# kind rather than by collection so every scores table sorts together in the
+# HF config list, and adding a collection is two new tables rather than new
+# columns on an existing one (which would rewrite every row).
+#
+# `score_raw` is deliberately the only score column. GSVA's `normalize=TRUE`
+# divides by the range of the entire score matrix, which makes a score depend
+# on the cohort and the collection it was computed alongside rather than on
+# the sample. Raw scores depend on nothing but their own sample, so they can
+# be computed per project, stay valid when projects or collections are added
+# later, and still yield the normalized view on demand — the divisor is
+# recoverable from the stats table as MAX(max) - MIN(min) over its
+# `pan_cancer` rows.
+SSGSEA_COLLECTIONS: list[str] = ["hallmark"]
+
+TABULAR_SSGSEA_SCORES_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    pa.field("sample_id", pa.string()),
+    pa.field("sample_submitter_id", pa.string()),
+    # Carried despite the expression table not carrying it: tumor-vs-normal
+    # is the dominant filter on pathway activity, and recovering it
+    # otherwise means unnesting `cases.samples`.
+    pa.field("sample_type", pa.string()),
+    *_ALIQUOT_FKS,
+    pa.field("source_file_id", pa.string()),
+    pa.field("pathway", pa.string()),
+    # Per-pathway provenance. Constant within a pathway, so dictionary
+    # encoding makes it ~1% of the table, and it lets a consumer filter on
+    # gene-set coverage without a join.
+    pa.field("matched_gene_count", pa.int32()),
+    pa.field("original_gene_count", pa.int32()),
+    pa.field("score_raw", pa.float64()),
+]
+
+# Reference distributions for turning raw scores into z-scores or GSVA-style
+# normalized values. Every value here is derivable from the scores tables by
+# aggregation — this is a materialized convenience view, not new evidence.
+# Each project ships its own rows *plus* the pan-cancer rows, so a consumer
+# who loads one project can still normalize against all of TCGA without
+# scanning 33 configs.
+TABULAR_SSGSEA_STATS_FIELDS: list[pa.Field] = [
+    # "pan_cancer" (every project) or "project" (this project alone).
+    pa.field("population", pa.string()),
+    # Null on pan_cancer rows.
+    pa.field("project_id", pa.string()),
+    # Null means every sample type; otherwise the type the row is restricted to.
+    pa.field("sample_type", pa.string()),
+    pa.field("pathway", pa.string()),
+    pa.field("n_aliquots", pa.int64()),
+    pa.field("mean", pa.float64()),
+    # Sample standard deviation (ddof=1); null when n_aliquots < 2.
+    pa.field("sd", pa.float64()),
+    pa.field("min", pa.float64()),
+    pa.field("q25", pa.float64()),
+    pa.field("median", pa.float64()),
+    pa.field("q75", pa.float64()),
+    pa.field("max", pa.float64()),
+]
+
+
+def ssgsea_scores_table(collection: str) -> str:
+    return f"ssgsea_scores_{collection}"
+
+
+def ssgsea_stats_table(collection: str) -> str:
+    return f"ssgsea_stats_{collection}"
+
+
 # Map of table-name → schema, used by the build-tabular command and the
 # dataset card generator. Table names mirror the GDC's stable concepts:
 # `cases` (cases.json), `masked_somatic_mutation` and
@@ -922,4 +991,9 @@ TABULAR_TABLES: dict[str, pa.Schema] = {
     "files": pa.schema(TABULAR_FILES_FIELDS),
     "survival_derived": pa.schema(TABULAR_SURVIVAL_DERIVED_FIELDS),
     "pathology_report": pa.schema(TABULAR_PATHOLOGY_REPORT_FIELDS),
+    # One scores + one stats table per gene-set collection. Extending to
+    # Reactome or WikiPathways is an entry in SSGSEA_COLLECTIONS; the
+    # schemas, emitters and tests are all collection-agnostic.
+    **{ssgsea_scores_table(c): pa.schema(TABULAR_SSGSEA_SCORES_FIELDS) for c in SSGSEA_COLLECTIONS},
+    **{ssgsea_stats_table(c): pa.schema(TABULAR_SSGSEA_STATS_FIELDS) for c in SSGSEA_COLLECTIONS},
 }
