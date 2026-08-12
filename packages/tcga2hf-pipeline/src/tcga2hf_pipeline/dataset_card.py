@@ -114,11 +114,14 @@ Three sources feed each project's data, all open-access:
               └── aliquot    a vial of that analyte handed off for sequencing
   ```
 
-- **Per-modality molecular files** — discovered via `/files` (filtered
-  by the clauses in the table below) and downloaded via `/data`. Each
+- **Per-modality files** — discovered via `/files` (filtered by the
+  clauses in the table below) and downloaded via `/data`. Each
   combination locks one `data_type` to a specific GDC pipeline so a
   future GDC addition can't quietly substitute a different pipeline
-  under the same `data_type`.
+  under the same `data_type`. This covers both the molecular modalities
+  and the scanned Pathology Report PDFs, which are carried verbatim —
+  no text extraction is applied, so consumers can run whichever parser
+  they trust against the original document.
 - **BCR Clinical Supplement biotabs** — original Biospecimen Core
   Resource (BCR) clinical forms shipped as per-project TSVs (one per
   form: patient, follow_up, nte, drug, radiation, etc.). The harmonized
@@ -155,6 +158,7 @@ _PATIENT_VIEW_MAPPING = """\
 | Masked Somatic Mutation MAFs | `samples_masked_somatic_mutation` array on each patient row (sample FKs resolved alongside GDC's aliquot UUIDs) |
 | Gene Expression Quantification | `samples_gene_expression_quantification` array on each patient row (`stranded_first` / `stranded_second` dropped — GDC harmonizes as unstranded) |
 | BCR Clinical Supplements | `clinical_supplement` struct on each patient row, with sub-fields `patient` (1 dict) and `follow_ups` / `ntes` / `drugs` / `radiations` / `ablations` / `omfs` (lists of dicts). Sub-fields with no data for the project are omitted. |
+| Pathology Reports | `samples_pathology_report` array on each patient row; `pdf_bytes` holds the scanned PDF verbatim, joined to its sample via `pathology_report_uuid` |
 """
 
 
@@ -165,6 +169,7 @@ _TABULAR_VIEW_MAPPING = """\
 | Masked Somatic Mutation MAFs | `masked_somatic_mutation` table — one row per variant (sample FKs resolved alongside GDC's aliquot UUIDs) |
 | Gene Expression Quantification | `gene_expression_quantification` table — one row per (aliquot, gene); `stranded_first` / `stranded_second` dropped (GDC harmonizes as unstranded) |
 | BCR Clinical Supplements | `clinical_supplement_*` tables — one per BCR form (patient, follow_up, nte, drug, radiation, ablation, omf) |
+| Pathology Reports | `pathology_report` table — one row per report, with the scanned PDF verbatim in `pdf_bytes` |
 | Per-modality manifests | `files` table — one row per (file, case) with `file_id` / `md5sum` / `data_type` / size; useful for joining a row back to its source file or replaying a specific modality fetch |
 """
 
@@ -404,9 +409,17 @@ all 33 TCGA projects.
 # ===========================================================================
 
 
-def _configs_yaml(projects: list[str]) -> str:
+def _configs_yaml(processed_dir: Path, projects: list[str]) -> str:
+    """One config per project whose parquet actually exists on disk.
+
+    Filesystem-aware for the same reason `_tabular_configs_yaml` is: a
+    config pointing at a missing path makes HF Data Studio emit "file not
+    found" rather than simply omitting the subset.
+    """
     lines = ["configs:"]
     for project in sorted(projects):
+        if not (processed_dir / project / "data.parquet").exists():
+            continue
         lines.append(f"  - config_name: {project}")
         lines.append("    data_files:")
         lines.append("      - split: train")
@@ -476,7 +489,7 @@ def write_card(
 ) -> Path:
     """Write the patients dataset card."""
     timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    configs_block = _configs_yaml(projects)
+    configs_block = _configs_yaml(processed_dir, projects)
     release_md = _release_md(gdc_releases)
 
     frontmatter = f"""---

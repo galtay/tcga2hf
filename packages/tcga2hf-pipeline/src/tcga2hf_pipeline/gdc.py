@@ -157,6 +157,34 @@ class GDCClient:
         wait=wait_exponential(multiplier=1, min=1, max=30),
         retry=retry_if_exception_type(_RETRYABLE),
     )
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
+        retry=retry_if_exception_type(_RETRYABLE),
+    )
+    def versions(self, file_uuids: list[str], chunk_size: int = 500) -> dict[str, dict[str, Any]]:
+        """Return {file_id: version record} from POST /files/versions.
+
+        Each record carries the file's own `version` and `release` (the GDC
+        release it *first* appeared in), plus `latest_id` / `latest_version`
+        for whatever supersedes it. This pins provenance per file rather
+        than per fetch: the API only ever serves the current release, so the
+        release we happen to fetch at says nothing about whether the bytes
+        changed. A file whose `id == latest_id` is byte-identical to what
+        every release since its own served, which is what actually matters
+        when a modality is added to the dataset years after the rest.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(file_uuids), chunk_size):
+            chunk = file_uuids[i : i + chunk_size]
+            resp = self._client.post("/files/versions", json={"ids": chunk}, timeout=120.0)
+            resp.raise_for_status()
+            for record in resp.json():
+                if record.get("id"):
+                    out[record["id"]] = record
+        return out
+
     def download(self, file_uuid: str, out_path: Path) -> None:
         """Stream a single open-access file by UUID. Used by future genomic modules."""
         out_path.parent.mkdir(parents=True, exist_ok=True)

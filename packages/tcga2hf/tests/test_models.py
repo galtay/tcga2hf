@@ -24,6 +24,7 @@ from tcga2hf.models import (
     FollowUp,
     GeneExpression,
     Mutation,
+    PathologyReport,
     Portion,
     Sample,
     TcgaHfPatient,
@@ -140,6 +141,7 @@ def test_pydantic_fields_match_pa_fields_exactly() -> None:
         (FamilyHistory, schema.FAMILY_HISTORY_FIELDS, set()),
         (Mutation, schema.MUTATION_FIELDS, set()),
         (GeneExpression, schema.EXPRESSION_FIELDS, set()),
+        (PathologyReport, schema.PATHOLOGY_REPORT_FIELDS, set()),
         (TcgaHfPatient, schema.PATIENT_FIELDS, {"clinical_supplement"}),
     ]
     for cls, fields, extras in pairs:
@@ -149,6 +151,66 @@ def test_pydantic_fields_match_pa_fields_exactly() -> None:
             f"{cls.__name__}: pydantic - pa = {pyd_names - pa_names}; "
             f"pa - pydantic = {pa_names - pyd_names}"
         )
+
+
+def _mk_patient_with_report(*, pdf: bytes = b"%PDF-1.4 fake") -> TcgaHfPatient:
+    """A patient with one tumor sample and its pathology report attached."""
+    return TcgaHfPatient(
+        case_id="case-1",
+        case_submitter_id="TCGA-XX-1",
+        project_id="TCGA-CHOL",
+        samples=[
+            Sample(
+                sample_id="tumor-s",
+                submitter_id="TCGA-XX-1-01A",
+                tissue_type="Tumor",
+                pathology_report_uuid="REPORT-UUID",
+            )
+        ],
+        samples_pathology_report=[
+            PathologyReport(
+                sample_id="tumor-s",
+                sample_submitter_id="TCGA-XX-1-01A",
+                pathology_report_uuid="REPORT-UUID",
+                source_file_id="file-1",
+                file_name="TCGA-XX-1.REPORT-UUID.PDF",
+                file_size=len(pdf),
+                pdf_bytes=pdf,
+            )
+        ],
+    )
+
+
+def test_pathology_report_bytes_survive_the_model() -> None:
+    """pa.binary() -> pydantic `bytes` with no re-encoding."""
+    p = _mk_patient_with_report()
+    (report,) = p.samples_pathology_report
+    assert report.pdf_bytes == b"%PDF-1.4 fake"
+    assert p.pathology_reports_by_sample() == {"tumor-s": [report]}
+
+
+def test_write_pdf_round_trips_to_disk(tmp_path: Path) -> None:
+    p = _mk_patient_with_report()
+    out = p.samples_pathology_report[0].write_pdf(tmp_path / "nested" / "report.pdf")
+    assert out.read_bytes() == b"%PDF-1.4 fake"
+
+
+def test_write_pdf_raises_when_bytes_were_projected_away() -> None:
+    """Column projection is the expected way to read these rows cheaply, so
+    the failure has to name that cause rather than raise AttributeError."""
+    report = PathologyReport(source_file_id="file-1")
+    with pytest.raises(ValueError, match="pdf_bytes"):
+        report.write_pdf("unused.pdf")
+
+
+def test_samples_missing_pathology_report_flags_unfetched_reports() -> None:
+    """GDC populates sample.pathology_report_uuid whether or not we fetched
+    the PDF, so the gap has to be visible to a consumer."""
+    p = _mk_patient_with_report()
+    assert p.samples_missing_pathology_report() == []
+
+    p.samples_pathology_report = []
+    assert [s.sample_id for s in p.samples_missing_pathology_report()] == ["tumor-s"]
 
 
 def test_aliquot_to_sample_walks_full_tree() -> None:

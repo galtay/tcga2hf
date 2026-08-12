@@ -172,3 +172,50 @@ def test_bulk_download_smoke(tmp_path: Path) -> None:
         target = tmp_path / name
         assert target.exists(), name
         assert target.stat().st_size == size, (name, target.stat().st_size, size)
+
+
+def _versions_client(records: list[dict], calls: list[list[str]]) -> GDCClient:
+    """A GDCClient whose POST /files/versions returns `records`, logging id batches."""
+
+    def post(path: str, json: dict, timeout: float) -> MagicMock:  # noqa: A002
+        assert path == "/files/versions"
+        calls.append(json["ids"])
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = [r for r in records if r["id"] in json["ids"]]
+        return resp
+
+    client = GDCClient.__new__(GDCClient)
+    client._client = MagicMock()
+    client._client.post.side_effect = post
+    return client
+
+
+def test_versions_maps_ids_to_records() -> None:
+    records = [
+        {"id": "a", "version": "1", "release": "36.0", "latest_id": "a"},
+        {"id": "b", "version": "2", "release": "40.0", "latest_id": "b"},
+    ]
+    client = _versions_client(records, calls=[])
+    out = client.versions(["a", "b"])
+    assert out["a"]["release"] == "36.0"
+    assert out["b"]["version"] == "2"
+
+
+def test_versions_chunks_large_id_lists() -> None:
+    """Version lookups must not send one unbounded POST for a big project."""
+    ids = [str(i) for i in range(1250)]
+    records = [{"id": i, "version": "1", "release": "36.0", "latest_id": i} for i in ids]
+    calls: list[list[str]] = []
+    client = _versions_client(records, calls)
+
+    out = client.versions(ids, chunk_size=500)
+    assert len(out) == 1250
+    assert [len(c) for c in calls] == [500, 500, 250]
+
+
+def test_versions_of_empty_list_makes_no_request() -> None:
+    calls: list[list[str]] = []
+    client = _versions_client([], calls)
+    assert client.versions([]) == {}
+    assert calls == []

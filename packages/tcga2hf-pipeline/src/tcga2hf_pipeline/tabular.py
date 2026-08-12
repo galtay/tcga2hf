@@ -15,12 +15,21 @@ splits each project into four tables, named after stable GDC concepts:
                                        snake-cased GDC data_type for
                                        RNA-Seq expression (today: STAR
                                        counts TSVs)
+  - `pathology_report`                 one row per scanned report PDF —
+                                       the document bytes verbatim, no
+                                       text extraction (see
+                                       `tcga2hf_pipeline.pathology`)
   - `files`                            one row per (file, case) from the
                                        per-modality manifests
 
-The `cases` table reuses `clinical.to_patient_rows` and drops the two
-molecular-vector columns. The molecular and provenance tables read the
-same raw inputs the consolidated build does.
+Two further tables are built elsewhere and land in the same tree:
+`survival_derived` (projected off the cases rows by `derived_survival_rows`
+after the caller attaches survival) and the flex-schema
+`clinical_supplement_*` set (one per BCR biotab form).
+
+The `cases` table reuses `clinical.to_patient_rows` and drops the
+per-file modality columns. The molecular, document, and provenance tables
+read the same raw inputs the consolidated build does.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from tcga2hf_pipeline import clinical as _clinical_mod
 from tcga2hf_pipeline import clinical_supplement as _clinical_supplement_mod
 from tcga2hf_pipeline import expression as _expression_mod
 from tcga2hf_pipeline import mutations as _mutations_mod
+from tcga2hf_pipeline import pathology as _pathology_mod
 
 # Names of `cases` table columns, used to re-shape patient rows. Excludes
 # the two molecular-vector columns that the consolidated row carries (they
@@ -194,6 +204,46 @@ def _to_float_or_none(v: Any) -> float | None:
     return float(v)
 
 
+def _pathology_report_rows(
+    cases: list[dict[str, Any]],
+    project_raw_dir: Path,
+) -> list[dict[str, Any]]:
+    """One row per pathology report PDF, with case FKs prepended.
+
+    Reuses the consolidated loader (which reads the bytes and resolves the
+    sample FK from `associated_entities`), then applies the same filename-UUID
+    fallback `pathology.attach` does — here against the raw GDC case dict
+    rather than a built patient row.
+    """
+    by_case = _pathology_mod.load_for_project(project_raw_dir)
+    if not by_case:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    case_index = {c.get("case_id"): c for c in cases}
+    for case_id, reports in by_case.items():
+        case = case_index.get(case_id)
+        if case is None:
+            continue
+        uuid_to_sample = {
+            s["pathology_report_uuid"]: s
+            for s in (case.get("samples") or [])
+            if s.get("pathology_report_uuid")
+        }
+        for r in reports:
+            row = dict(r)
+            if row["sample_id"] is None:
+                fallback = uuid_to_sample.get(row["pathology_report_uuid"] or "")
+                if fallback:
+                    row["sample_id"] = fallback.get("sample_id")
+                    row["sample_submitter_id"] = fallback.get("submitter_id")
+            row["case_id"] = case_id
+            row["case_submitter_id"] = case.get("submitter_id")
+            rows.append(row)
+    rows.sort(key=lambda r: (r.get("case_submitter_id") or "", r.get("file_name") or ""))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Files (provenance from per-modality manifests)
 # ---------------------------------------------------------------------------
@@ -227,6 +277,11 @@ def _files_rows(project_raw_dir: Path) -> list[dict[str, Any]]:
                 "experimental_strategy": entry.get("experimental_strategy"),
                 "workflow_type": entry.get("workflow_type"),
                 "access": entry.get("access"),
+                # Absent from manifests written before version provenance
+                # was recorded; those rows report null rather than a guess.
+                "gdc_version": entry.get("gdc_version"),
+                "gdc_first_release": entry.get("gdc_first_release"),
+                "gdc_superseded": entry.get("gdc_superseded"),
                 "modality": modality,
             }
             cases = entry.get("cases") or []
@@ -252,18 +307,27 @@ def _files_rows(project_raw_dir: Path) -> list[dict[str, Any]]:
 def build_tables(
     cases: list[dict[str, Any]],
     project_raw_dir: Path,
+    only: set[str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Build every tabular table for one project.
+    """Build tabular tables for one project (all of them unless `only` is given).
 
     Returns one entry per table keyed by table name. The fixed-schema
     keys (`cases`, `masked_somatic_mutation`, `gene_expression_quantification`,
-    `files`, `survival_derived`) match `TABULAR_TABLES`. The
+    `pathology_report`, `files`, `survival_derived`) match `TABULAR_TABLES`. The
     `clinical_supplement_*` keys are flex-schema tables — their parquet
     column set is inferred per project, since BCR biotab forms vary by
     cancer type (e.g. BLCA's clinical_patient form has bladder-specific
     fields that don't exist in CHOL's). Cross-project queries union via
     HF `concatenate_datasets` with NULL padding — the same pattern
     cBioPortal and the GDC use for their per-study clinical exports.
+
+    `only` restricts the build to the named tables. Each table's rows are
+    produced by a thunk that is called only when its table is wanted, so
+    the expensive emitters — `gene_expression_quantification` re-reads
+    every STAR TSV in the project, `masked_somatic_mutation` every MAF —
+    cost nothing when a caller is appending one new table to an existing
+    tree. `cases` is still built whenever `survival_derived` is requested,
+    since the derived endpoints are projected off those rows.
 
     Note: the `survival_derived` table starts empty here. The caller must
     `survival.attach_survival(tables["cases"])` and then call
@@ -272,21 +336,37 @@ def build_tables(
     survival re-derivation depends on Clinical Supplement data the caller
     may attach beforehand.
     """
-    mut_by_case = _mutations_mod.load_for_project(project_raw_dir)
 
-    tables: dict[str, list[dict[str, Any]]] = {
-        "cases": _cases_rows(cases),
-        "masked_somatic_mutation": _mutations_rows(cases, mut_by_case),
-        "gene_expression_quantification": _expression_rows(cases, project_raw_dir),
-        "files": _files_rows(project_raw_dir),
-        "survival_derived": [],
+    def _mutation_rows() -> list[dict[str, Any]]:
+        return _mutations_rows(cases, _mutations_mod.load_for_project(project_raw_dir))
+
+    thunks: dict[str, Any] = {
+        "cases": lambda: _cases_rows(cases),
+        "masked_somatic_mutation": _mutation_rows,
+        "gene_expression_quantification": lambda: _expression_rows(cases, project_raw_dir),
+        "files": lambda: _files_rows(project_raw_dir),
+        "survival_derived": list,
+        "pathology_report": lambda: _pathology_report_rows(cases, project_raw_dir),
     }
 
-    supp_rows = _clinical_supplement_mod.build_tabular_rows(
-        project_raw_dir / "clinical_supplement"
-    )
-    for suffix, rows in supp_rows.items():
-        tables[f"clinical_supplement_{suffix}"] = rows
+    wanted = set(thunks) if only is None else set(only)
+    # survival_derived is projected off the cases rows, so it drags `cases`
+    # in even when the caller didn't ask for it directly.
+    if "survival_derived" in wanted:
+        wanted.add("cases")
+
+    tables: dict[str, list[dict[str, Any]]] = {
+        name: thunk() for name, thunk in thunks.items() if name in wanted
+    }
+
+    if only is None or any(t.startswith("clinical_supplement_") for t in wanted):
+        supp_rows = _clinical_supplement_mod.build_tabular_rows(
+            project_raw_dir / "clinical_supplement"
+        )
+        for suffix, rows in supp_rows.items():
+            name = f"clinical_supplement_{suffix}"
+            if only is None or name in wanted:
+                tables[name] = rows
     return tables
 
 

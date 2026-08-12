@@ -41,6 +41,15 @@ FILE_FIELDS: list[str] = [
     "cases.case_id",
     "cases.submitter_id",
     "cases.samples.portions.analytes.aliquots.aliquot_id",
+    # GDC's uniform "what biospecimen entity is this file about" pointer.
+    # The nested `cases.samples...aliquots` path above only resolves for
+    # aliquot-level modalities; `associated_entities` names the entity at
+    # whatever level the file actually attaches (aliquot for MAF / STAR,
+    # sample for Pathology Report, portion for RPPA), so modalities that
+    # aren't aliquot-scoped can still resolve an FK.
+    "associated_entities.entity_id",
+    "associated_entities.entity_type",
+    "associated_entities.entity_submitter_id",
 ]
 
 
@@ -64,6 +73,13 @@ MODALITY_FILTERS: dict[str, dict[str, str]] = {
         "data_category": "Transcriptome Profiling",
         "experimental_strategy": "RNA-Seq",
         "analysis.workflow_type": "STAR - Counts",
+    },
+    # Pathology reports are scanned documents, not pipeline output, so they
+    # carry no experimental_strategy or workflow_type to pin — data_format
+    # and data_category are the whole lock.
+    "Pathology Report": {
+        "data_format": "PDF",
+        "data_category": "Clinical",
     },
 }
 
@@ -150,8 +166,17 @@ def fetch_files(
         only = next(h for h in hits if h["file_id"] == to_download_ids[0])
         client.download(only["file_id"], out_dir / only["file_name"])
 
+    # Per-file version provenance. The `/files` + `/data` endpoints only
+    # ever serve the current GDC release, so the release we fetch at is a
+    # timestamp, not a description of the bytes. `gdc_version` +
+    # `gdc_first_release` say what the bytes actually are, and
+    # `gdc_superseded` flags the one case that matters — a file GDC has
+    # since replaced with a newer version under a different id.
+    versions = client.versions([h["file_id"] for h in hits]) if hits else {}
+
     manifest: list[dict[str, Any]] = []
     for hit in hits:
+        version = versions.get(hit["file_id"], {})
         # GDC nests workflow info under `analysis.*`; flatten it into the
         # manifest so downstream consumers see a single `workflow_type`
         # column matching the dataset's `files` schema.
@@ -174,7 +199,13 @@ def fetch_files(
                 "experimental_strategy": hit.get("experimental_strategy"),
                 "workflow_type": analysis.get("workflow_type"),
                 "access": hit.get("access"),
+                "gdc_version": version.get("version"),
+                "gdc_first_release": version.get("release"),
+                "gdc_superseded": bool(
+                    version and version.get("latest_id") not in (None, hit["file_id"])
+                ),
                 "cases": hit.get("cases", []),
+                "associated_entities": hit.get("associated_entities", []),
                 "_status": status,
             }
         )

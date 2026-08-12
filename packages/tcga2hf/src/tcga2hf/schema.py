@@ -672,6 +672,40 @@ EXPRESSION_FIELDS: list[pa.Field] = [
 ]
 
 # ---------------------------------------------------------------------------
+# Clinical: Pathology Report (the BCR-scanned PDF, shipped verbatim)
+#
+# Unlike every other modality here, the payload is not a parsed table — it's
+# the source document itself. TCGA pathology reports are scanned PDFs; GDC
+# ships them open-access with patient identifiers redacted out of the page
+# image. We carry the bytes unmodified in `pdf_bytes` rather than a text
+# extraction, because any parse is a lossy, tool-and-version-specific
+# derivation that consumers should be able to redo (and disagree with)
+# without re-downloading 2.6 GB from GDC. A canonical parse, if we add one,
+# belongs in its own clearly-labeled column alongside these bytes.
+#
+# `pathology_report_uuid` is parsed out of the GDC file name
+# (`<case_submitter_id>.<REPORT_UUID>.PDF`) and is the same value the GDC
+# already reports on `sample.pathology_report_uuid` — so a report joins to
+# its sample through a key the dataset has always carried.
+# ---------------------------------------------------------------------------
+
+PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
+    pa.field("sample_id", pa.string()),
+    pa.field("sample_submitter_id", pa.string()),
+    # Matches `sample.pathology_report_uuid` in SAMPLE_FIELDS.
+    pa.field("pathology_report_uuid", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    pa.field("file_name", pa.string()),
+    pa.field("file_size", pa.int64()),
+    pa.field("md5sum", pa.string()),
+    # The PDF exactly as GDC serves it. Stored as parquet BYTE_ARRAY rather
+    # than a base64 string: on this corpus binary+snappy lands at 0.92x the
+    # raw bytes where base64+snappy is 1.26x, and `datasets` surfaces it as
+    # Value("binary") either way.
+    pa.field("pdf_bytes", pa.binary()),
+]
+
+# ---------------------------------------------------------------------------
 # Top-level patient row
 # ---------------------------------------------------------------------------
 
@@ -707,6 +741,7 @@ PATIENT_FIELDS: list[pa.Field] = [
         "samples_gene_expression_quantification",
         pa.list_(pa.struct(EXPRESSION_FIELDS)),
     ),
+    pa.field("samples_pathology_report", pa.list_(pa.struct(PATHOLOGY_REPORT_FIELDS))),
     # Survival endpoints — re-derived from the current GDC data using the
     # algorithm published by Liu et al. 2018 (Cell, TCGA Pan-Cancer Clinical
     # Data Resource). Implementation in `tcga2hf_pipeline.survival`;
@@ -786,6 +821,7 @@ TABULAR_CASES_FIELDS: list[pa.Field] = [
     not in {
         "samples_masked_somatic_mutation",
         "samples_gene_expression_quantification",
+        "samples_pathology_report",
     }
 ]
 
@@ -834,6 +870,15 @@ TABULAR_FILES_FIELDS: list[pa.Field] = [
     pa.field("experimental_strategy", pa.string()),
     pa.field("workflow_type", pa.string()),
     pa.field("access", pa.string()),
+    # Per-file version provenance from GDC's /files/versions. `gdc_version`
+    # is the file's own version and `gdc_first_release` the GDC release it
+    # first appeared in — together they identify the bytes independently of
+    # which release we happened to fetch at (the API only serves the
+    # current one). `gdc_superseded` is true when GDC has since replaced
+    # this file with a newer version under a different id.
+    pa.field("gdc_version", pa.string()),
+    pa.field("gdc_first_release", pa.string()),
+    pa.field("gdc_superseded", pa.bool_()),
     # Local label naming the project subdir the file came from
     # (`mutations` / `expression` / ...).
     pa.field("modality", pa.string()),
@@ -852,6 +897,15 @@ TABULAR_SURVIVAL_DERIVED_FIELDS: list[pa.Field] = [
 ]
 
 
+# Pathology reports: one row per report PDF. Reports are near-1:1 with cases
+# pan-TCGA (11,208 reports / 11,121 cases), so this table stays small in row
+# count and large only in bytes.
+TABULAR_PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    *PATHOLOGY_REPORT_FIELDS,
+]
+
+
 # Map of table-name → schema, used by the build-tabular command and the
 # dataset card generator. Table names mirror the GDC's stable concepts:
 # `cases` (cases.json), `masked_somatic_mutation` and
@@ -867,4 +921,5 @@ TABULAR_TABLES: dict[str, pa.Schema] = {
     "gene_expression_quantification": pa.schema(TABULAR_EXPRESSION_FIELDS),
     "files": pa.schema(TABULAR_FILES_FIELDS),
     "survival_derived": pa.schema(TABULAR_SURVIVAL_DERIVED_FIELDS),
+    "pathology_report": pa.schema(TABULAR_PATHOLOGY_REPORT_FIELDS),
 }

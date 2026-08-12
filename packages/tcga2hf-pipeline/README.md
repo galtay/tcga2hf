@@ -44,25 +44,46 @@ These hit the GDC for open-access data. Acronyms used below: MAF =
 Mutation Annotation Format; WXS = Whole Exome Sequencing.
 
 ```
-tcga2hf-pipeline fetch-clinical    # GDC -> raw cases.json per project
-tcga2hf-pipeline fetch-mutations   # GDC -> Masked Somatic Mutation MAFs from WXS (DNA)
-tcga2hf-pipeline fetch-expression  # GDC -> Gene Expression Quantification TSVs from RNA-Seq (STAR counts)
-tcga2hf-pipeline build             # raw -> consolidated per-project parquets + dataset card
-tcga2hf-pipeline build-tabular     # raw -> per-(project, table) parquets + dataset card
-tcga2hf-pipeline upload            # push processed/ to the consolidated HF dataset repo
-tcga2hf-pipeline upload-tabular    # push processed_tabular/ to the tabular HF dataset repo
+tcga2hf-pipeline fetch-clinical           # GDC -> raw cases.json per project
+tcga2hf-pipeline fetch-mutations          # GDC -> Masked Somatic Mutation MAFs from WXS (DNA)
+tcga2hf-pipeline fetch-expression         # GDC -> Gene Expression Quantification TSVs from RNA-Seq (STAR counts)
+tcga2hf-pipeline fetch-pathology-reports  # GDC -> Pathology Report PDFs (scanned BCR documents)
+tcga2hf-pipeline build                    # raw -> consolidated per-project parquets + dataset card
+tcga2hf-pipeline build-tabular            # raw -> per-(project, table) parquets + dataset card
+tcga2hf-pipeline upload                   # push processed/ to the consolidated HF dataset repo
+tcga2hf-pipeline upload-tabular           # push processed_tabular/ to the tabular HF dataset repo
 ```
 
 `tcga2hf-pipeline <cmd> --help` for arguments. Notable flags:
 
-- `--project TCGA-LUAD` (repeatable) on every fetch command, plus on
-  `build-tabular`. Omit on the build commands to process every project
-  under `<data-dir>/raw/`.
+- `--project TCGA-LUAD` (repeatable) on every fetch command and on both
+  build commands. Omit on the build commands to process every project
+  under `<data-dir>/raw/` and rebuild the output tree from scratch.
+  **With** `--project`, only those projects' output directories are
+  replaced — everything else is left byte-identical, so a new modality can
+  be appended without re-deriving (or re-uploading) the whole cohort.
 - `--max-files N` on `fetch-mutations` / `fetch-expression`: cap the
   total number of files on disk per project (cached + freshly downloaded).
   Set to 1 to sample one file per project, or 0 to populate the manifest
   without downloading any new bytes. The manifest always lists every
   discovered file; entries trimmed off get `_status="manifest_only"`.
+
+## Provenance
+
+The GDC API only ever serves the current data release, so *when* a
+modality was fetched says nothing about whether its bytes changed. Two
+records pin that down:
+
+- **Per modality**: each `raw/<project>/<modality>/` directory keeps its
+  own `gdc_status.json` with the release it was fetched at, so modalities
+  added years apart each report their own. `raw/<project>/gdc_status.json`
+  belongs to `fetch-clinical` and describes `cases.json` alone.
+- **Per file**: manifests record `gdc_version`, `gdc_first_release`, and
+  `gdc_superseded` from `POST /files/versions`. A file with
+  `gdc_superseded=false` is byte-identical to what every release since
+  `gdc_first_release` served — which is the guarantee that actually
+  matters when modalities are fetched at different times. These surface on
+  the tabular `files` table.
 
 ## Tests
 

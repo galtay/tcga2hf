@@ -289,7 +289,20 @@ def test_write_card_release_line_unknown_when_missing(tmp_path: Path) -> None:
     assert "**GDC data release:** unknown" in text
 
 
+def _touch_patient_parquets(root: Path, projects: list[str]) -> None:
+    """Create the per-project parquet paths `_configs_yaml` checks for.
+
+    Contents don't matter — the card generator only tests existence, so a
+    config never points at a file the upload wouldn't carry.
+    """
+    for project in projects:
+        path = root / project / "data.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+
 def test_write_card_emits_one_config_per_project(tmp_path: Path) -> None:
+    _touch_patient_parquets(tmp_path, ["TCGA-DLBC", "TCGA-CHOL"])
     card = dataset_card.write_card(tmp_path, projects=["TCGA-DLBC", "TCGA-CHOL"])
     text = card.read_text()
     assert text.startswith("---\n")
@@ -306,3 +319,19 @@ def test_write_card_emits_one_config_per_project(tmp_path: Path) -> None:
     assert "path: TCGA-CHOL/data.parquet" in front
     assert "path: TCGA-DLBC/data.parquet" in front
     assert "split: train" in front
+
+
+def test_write_card_skips_projects_without_a_parquet(tmp_path: Path) -> None:
+    """A project with no parquet on disk gets no config.
+
+    Guards the incremental path: a `--project` build lists every project in
+    the tree, and any whose output is absent must not be advertised — HF
+    Data Studio surfaces a dangling path as an error rather than an
+    omission.
+    """
+    _touch_patient_parquets(tmp_path, ["TCGA-CHOL"])
+    card = dataset_card.write_card(tmp_path, projects=["TCGA-CHOL", "TCGA-DLBC"])
+    front = card.read_text().split("---\n", 2)[1]
+
+    assert "config_name: TCGA-CHOL" in front
+    assert "TCGA-DLBC" not in front

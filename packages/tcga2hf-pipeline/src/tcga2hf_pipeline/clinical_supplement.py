@@ -154,9 +154,15 @@ def fetch_clinical_supplements(
         only = next(h for h in eligible if h["file_id"] == to_download_ids[0])
         client.download(only["file_id"], out_dir / only["file_name"])
 
+    # Per-file version provenance, same as the genomic modalities — see
+    # `GDCClient.versions`. Biotabs are revised across releases more often
+    # than most GDC files, so `gdc_superseded` is worth carrying here.
+    versions = client.versions([h["file_id"] for h in eligible]) if eligible else {}
+
     manifest: list[dict[str, Any]] = []
     for hit in eligible:
         status = "cached" if hit["file_id"] in cached_ids else "downloaded"
+        version = versions.get(hit["file_id"], {})
         manifest.append({
             "file_id": hit["file_id"],
             "file_name": hit["file_name"],
@@ -164,6 +170,11 @@ def fetch_clinical_supplements(
             "md5sum": hit.get("md5sum"),
             "data_format": hit.get("data_format"),
             "form_kind": hit["_form_kind"],
+            "gdc_version": version.get("version"),
+            "gdc_first_release": version.get("release"),
+            "gdc_superseded": bool(
+                version and version.get("latest_id") not in (None, hit["file_id"])
+            ),
             "_status": status,
         })
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))

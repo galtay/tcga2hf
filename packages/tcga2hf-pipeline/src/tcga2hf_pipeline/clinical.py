@@ -157,9 +157,11 @@ def _patient_row(case: dict[str, Any]) -> dict[str, Any]:
         "exposures": _sort_by_id(exposures, "exposure_id"),
         "family_histories": _sort_by_id(family_histories, "family_history_id"),
         "samples": _sort_temporal(samples, "days_to_collection", "sample_id"),
-        # Molecular columns default to []; build step fills them in if data is fetched.
+        # Per-file modality columns default to []; build step fills them in
+        # if the corresponding raw data has been fetched.
         "samples_masked_somatic_mutation": [],
         "samples_gene_expression_quantification": [],
+        "samples_pathology_report": [],
         # Re-derived survival endpoints (Liu et al. 2018 algorithm). Build
         # step fills the struct via `survival.attach_survival`. Initialized
         # here as an all-null struct so pyarrow's `from_pylist(rows, schema=PATIENTS)`

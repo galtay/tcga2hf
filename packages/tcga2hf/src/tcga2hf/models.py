@@ -63,6 +63,7 @@ from tcga2hf.schema import (
     FAMILY_HISTORY_FIELDS,
     FOLLOW_UP_FIELDS,
     MUTATION_FIELDS,
+    PATHOLOGY_REPORT_FIELDS,
     PATIENT_FIELDS,
     PORTION_FIELDS,
     SAMPLE_FIELDS,
@@ -94,6 +95,10 @@ def _pa_to_py_scalar(t: pa.DataType) -> type:
         return bool
     if pa.types.is_string(t):
         return str
+    if pa.types.is_binary(t):
+        # Raw document payloads (today: pathology report PDFs). pydantic
+        # accepts `bytes` straight from parquet without re-encoding.
+        return bytes
     raise TypeError(f"unhandled scalar pyarrow type {t!r}")
 
 
@@ -284,6 +289,44 @@ class GeneExpression(_GeneExpressionBase):
         }
 
 
+_PathologyReportBase = _make_entity(
+    "_PathologyReportBase",
+    PATHOLOGY_REPORT_FIELDS,
+    required=("source_file_id",),
+)
+
+
+class PathologyReport(_PathologyReportBase):
+    """One scanned pathology report PDF, exactly as GDC serves it.
+
+    `pdf_bytes` is the unmodified source document — no text extraction is
+    applied or shipped, because any parse is tool- and version-specific and
+    consumers should be free to redo it. `write_pdf` is the one convenience
+    offered: get the bytes onto disk so you can hand them to whichever
+    parser you trust.
+
+    These PDFs are page scans. Most carry an OCR text layer produced
+    upstream of GDC, so a pure-Python extractor will return *something* for
+    nearly every report — but that layer renders barcodes and handwritten
+    margin notes as noise, and its quality varies widely across the
+    submitting institutions. Treat it as a starting point, not ground truth.
+    """
+
+    def write_pdf(self, path: Any) -> Any:
+        """Write `pdf_bytes` to `path` and return it. No-op guard if empty."""
+        from pathlib import Path
+
+        out = Path(path)
+        if self.pdf_bytes is None:
+            raise ValueError(
+                f"report {self.source_file_id} carries no pdf_bytes "
+                "(column projected away, or PDF not fetched at build time)"
+            )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(self.pdf_bytes)
+        return out
+
+
 # ---------------------------------------------------------------------------
 # Patient: top-level row entity with cross-modality joins
 # ---------------------------------------------------------------------------
@@ -357,6 +400,7 @@ _TcgaHfPatientBase = _make_entity(
             list[GeneExpression],
             Field(default_factory=list),
         ),
+        "samples_pathology_report": (list[PathologyReport], Field(default_factory=list)),
         "survival_derived": (SurvivalDerived | None, None),
     },
     required=("case_id", "case_submitter_id", "project_id"),
@@ -455,6 +499,31 @@ class TcgaHfPatient(_TcgaHfPatientBase):
             if entry is not None:
                 out[er.aliquot_id] = entry
         return out
+
+    # ---- pathology report joins ----
+
+    def pathology_reports_by_sample(self) -> dict[str, list[PathologyReport]]:
+        """{sample_id: [report, ...]} for reports whose sample FK resolved."""
+        out: dict[str, list[PathologyReport]] = {}
+        for r in self.samples_pathology_report:
+            if r.sample_id:
+                out.setdefault(r.sample_id, []).append(r)
+        return out
+
+    def samples_missing_pathology_report(self) -> list[Sample]:
+        """Samples whose `pathology_report_uuid` has no matching report on this row.
+
+        GDC populates `sample.pathology_report_uuid` independently of whether
+        the report file itself is open-access and fetched, so a non-empty
+        result means either the modality wasn't fetched for this project or
+        GDC references a report it doesn't serve.
+        """
+        have = {r.pathology_report_uuid for r in self.samples_pathology_report}
+        return [
+            s
+            for s in self.samples
+            if s.pathology_report_uuid and s.pathology_report_uuid not in have
+        ]
 
     # ---- timeline consistency ----
 

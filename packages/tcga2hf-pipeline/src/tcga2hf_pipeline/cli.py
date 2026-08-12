@@ -19,6 +19,7 @@ from tcga2hf_pipeline import (
     genomic,
     hf_upload,
     mutations,
+    pathology,
     survival,
     tabular,
 )
@@ -54,6 +55,87 @@ DataDirOpt = Annotated[
         help="Root data dir. Defaults to $TCGA2HF_DATA_DIR or $HOME/data/tcga2hf.",
     ),
 ]
+
+ProjectFilterOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--project",
+        help=(
+            "TCGA project id (repeatable). If omitted, all projects under "
+            "<data-dir>/raw/ are processed and the output tree is rebuilt from "
+            "scratch. If given, only those projects' output dirs are replaced — "
+            "other projects' parquets are left untouched."
+        ),
+    ),
+]
+
+
+def _clear_processed(processed_dir: Path, project: list[str] | None) -> None:
+    """Remove prior output for the projects about to be rebuilt.
+
+    Without `--project` the whole tree goes, so projects dropped from raw/
+    and any legacy layout don't leave stale files behind. With `--project`
+    only the named projects' directories go: a full wipe there would delete
+    parquets we aren't regenerating, and (because HF uploads diff against
+    what's on disk) would turn an incremental append into a full re-upload.
+    """
+    if project is None:
+        if processed_dir.exists():
+            shutil.rmtree(processed_dir)
+        processed_dir.mkdir(parents=True)
+        return
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    for proj in project:
+        target = processed_dir / proj
+        if target.exists():
+            shutil.rmtree(target)
+
+
+def _card_inputs(
+    raw_dir: Path, processed_dir: Path, built_marker: str
+) -> tuple[list[str], dict[str, str]]:
+    """Return (projects, gdc_releases) for every project present in the output tree.
+
+    The dataset card describes the tree as a whole, not just the projects
+    this invocation rebuilt — otherwise a `--project` build would drop the
+    other projects from the `configs:` block and orphan their parquets on
+    the Hub. `built_marker` is a glob, relative to a project dir, that
+    identifies a completed build for the layout being written.
+
+    Each project's GDC release is read back from its own raw
+    `gdc_status.json`, so projects fetched at different releases report
+    their own — the card renders a per-project list rather than a single
+    release when they diverge.
+    """
+    projects: list[str] = []
+    gdc_releases: dict[str, str] = {}
+    if not processed_dir.exists():
+        return projects, gdc_releases
+    for project_dir in sorted(p for p in processed_dir.iterdir() if p.is_dir()):
+        if not any(project_dir.glob(built_marker)):
+            continue
+        proj = project_dir.name
+        projects.append(proj)
+        status_path = raw_dir / proj / "gdc_status.json"
+        if status_path.exists():
+            gdc_releases[proj] = json.loads(status_path.read_text()).get(
+                "data_release", "<unknown>"
+            )
+    return projects, gdc_releases
+
+
+def _select_projects(raw_dir: Path, project: list[str] | None) -> list[Path]:
+    """Resolve `--project` to the cases.json paths to process (all if None)."""
+    project_files = sorted(raw_dir.glob("*/cases.json"))
+    if project:
+        wanted = set(project)
+        project_files = [p for p in project_files if p.parent.name in wanted]
+        missing = wanted - {p.parent.name for p in project_files}
+        if missing:
+            raise typer.BadParameter(f"requested projects missing from raw/: {sorted(missing)}")
+    if not project_files:
+        raise typer.BadParameter(f"no cases.json files found under {raw_dir}.")
+    return project_files
 
 
 @app.command("fetch-clinical")
@@ -116,7 +198,15 @@ def _fetch_modality(
     modality_dir: str,
     max_files: int | None = None,
 ) -> None:
-    """Shared body for fetch-mutations / fetch-expression / future modalities."""
+    """Shared body for fetch-mutations / fetch-expression / future modalities.
+
+    The GDC release is recorded per modality, in the modality's own
+    directory — not on the project. Modalities are fetched at different
+    times (a new one added years later pulls whatever release GDC is
+    serving then), so one status file per project would report only the
+    most recent fetch and silently overwrite the release + dictionary hash
+    that `fetch-clinical` recorded for `cases.json`.
+    """
     root = _resolve_data_dir(data_dir)
     raw_dir = root / "raw"
     typer.echo(f"raw dir: {raw_dir}")
@@ -137,7 +227,7 @@ def _fetch_modality(
                 f"  {len(manifest):>4} files ({n_dl} downloaded, {n_cache} cached{extra}), "
                 f"{total_mb:.1f} MB total in manifest"
             )
-            (raw_dir / proj / "gdc_status.json").write_text(json.dumps(status, indent=2))
+            (out_dir / "gdc_status.json").write_text(json.dumps(status, indent=2))
 
 
 MaxFilesOpt = Annotated[
@@ -184,6 +274,29 @@ def fetch_expression_cmd(
     """Download open-access Gene Expression Quantification TSVs (RNA-Seq, STAR counts)."""
     _fetch_modality(
         project, data_dir, "Gene Expression Quantification", "expression", max_files=max_files
+    )
+
+
+@app.command("fetch-pathology-reports")
+def fetch_pathology_reports_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads open-access Pathology Report PDFs.",
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+    max_files: MaxFilesOpt = None,
+) -> None:
+    """Download open-access Pathology Report PDFs (scanned BCR documents).
+
+    One report per case's tumor sample, ~11,200 across TCGA (~2.6 GB; LAML
+    has none). The PDFs are shipped into the dataset verbatim — see
+    `tcga2hf_pipeline.pathology` for why no text extraction happens here.
+    """
+    _fetch_modality(
+        project, data_dir, "Pathology Report", "pathology_reports", max_files=max_files
     )
 
 
@@ -247,6 +360,7 @@ def fetch_cdr_cmd(
 
 @app.command("build")
 def build_cmd(
+    project: ProjectFilterOpt = None,
     data_dir: DataDirOpt = None,
 ) -> None:
     """Flatten raw clinical JSON into per-project patient Parquets + dataset card."""
@@ -259,31 +373,24 @@ def build_cmd(
     if not raw_dir.exists():
         raise typer.BadParameter(f"raw dir does not exist: {raw_dir}. Run fetch-clinical first.")
 
-    project_files = sorted(raw_dir.glob("*/cases.json"))
-    if not project_files:
-        raise typer.BadParameter(f"no cases.json files found under {raw_dir}.")
+    project_files = _select_projects(raw_dir, project)
+    _clear_processed(processed_dir, project)
 
-    # Wipe the whole processed_patient/ tree so removed projects + any legacy
-    # layout don't leave stale data behind.
-    if processed_dir.exists():
-        shutil.rmtree(processed_dir)
-    processed_dir.mkdir(parents=True)
-
-    projects: list[str] = []
-    gdc_releases: dict[str, str] = {}
     for path in project_files:
         proj = path.parent.name
-        projects.append(proj)
         cases = json.loads(path.read_text())
         rows = clinical.to_patient_rows(cases)
 
         # Attach molecular modalities if their raw data has been fetched.
         mut_by_case = mutations.load_for_project(path.parent)
         expr_by_case = expression.load_for_project(path.parent)
+        path_by_case = pathology.load_for_project(path.parent)
         if mut_by_case:
             mutations.attach(rows, mut_by_case)
         if expr_by_case:
             expression.attach(rows, expr_by_case)
+        if path_by_case:
+            pathology.attach(rows, path_by_case)
         # Attach BCR biotab Clinical Supplement data if it's been fetched.
         # survival.attach_survival reads `row["clinical_supplement"]` for the
         # ~2.4×-better-populated `treatment_outcome_first_course` field,
@@ -301,22 +408,20 @@ def build_cmd(
 
         n_variants = sum(len(r["samples_masked_somatic_mutation"]) for r in rows)
         n_expr = sum(len(r["samples_gene_expression_quantification"]) for r in rows)
+        n_path = sum(len(r["samples_pathology_report"]) for r in rows)
         n_os = sum(1 for r in rows if (r.get("survival_derived") or {}).get("os_event") is not None)
         typer.echo(
             f"  {proj:<12} {len(rows):>4} patients  "
             f"mutations={n_variants:>5} ({len(mut_by_case)} MAFs)  "
             f"expression={n_expr:>4} aliquots ({len(expr_by_case)} TSVs)  "
+            f"path_reports={n_path:>4}  "
             f"os={n_os}/{len(rows)}"
         )
 
         out = clinical.write_patients(rows, processed_dir, proj)
         typer.echo(f"             -> {out}")
 
-        status_path = path.parent / "gdc_status.json"
-        if status_path.exists():
-            status = json.loads(status_path.read_text())
-            gdc_releases[proj] = status.get("data_release", "<unknown>")
-
+    projects, gdc_releases = _card_inputs(raw_dir, processed_dir, "data.parquet")
     card = dataset_card.write_card(processed_dir, projects, gdc_releases=gdc_releases)
     typer.echo(f"wrote dataset card -> {card}")
     typer.echo(f"done. processed_patient tree at: {processed_dir}")
@@ -324,13 +429,16 @@ def build_cmd(
 
 @app.command("build-tabular")
 def build_tabular_cmd(
-    project: Annotated[
+    project: ProjectFilterOpt = None,
+    table: Annotated[
         list[str] | None,
         typer.Option(
-            "--project",
+            "--table",
             help=(
-                "TCGA project id (repeatable). If omitted, all projects under "
-                "<data-dir>/raw/ are processed."
+                "Table name (repeatable). If omitted, every table is built. If "
+                "given, only those tables are re-derived and written; the "
+                "project's other parquets are left untouched. Use this to append "
+                "a newly-added modality without re-deriving the whole tree."
             ),
         ),
     ] = None,
@@ -350,61 +458,75 @@ def build_tabular_cmd(
     if not raw_dir.exists():
         raise typer.BadParameter(f"raw dir does not exist: {raw_dir}. Run fetch-clinical first.")
 
-    project_files = sorted(raw_dir.glob("*/cases.json"))
-    if project:
-        wanted = set(project)
-        project_files = [p for p in project_files if p.parent.name in wanted]
-        missing = wanted - {p.parent.name for p in project_files}
-        if missing:
+    project_files = _select_projects(raw_dir, project)
+
+    only: set[str] | None = None
+    if table:
+        known = set(TABULAR_TABLES) | {
+            f"clinical_supplement_{kind}" for kind in clinical_supplement.TABULAR_FORM_KINDS
+        }
+        unknown = set(table) - known
+        if unknown:
             raise typer.BadParameter(
-                f"requested projects missing from raw/: {sorted(missing)}"
+                f"unknown table(s): {sorted(unknown)}. Known: {sorted(known)}"
             )
-    if not project_files:
-        raise typer.BadParameter(f"no cases.json files found under {raw_dir}.")
+        only = set(table)
+        typer.echo(f"tables:        {', '.join(sorted(only))} (other tables left as-is)")
 
-    # Wipe any prior tabular tree so removed projects/tables don't leave
-    # stale data behind.
-    if processed_dir.exists():
-        shutil.rmtree(processed_dir)
-    processed_dir.mkdir(parents=True)
+    # Clear prior output so removed projects/tables don't leave stale data
+    # behind. Scope the wipe to what we're about to rebuild: with --project
+    # only those project dirs go, leaving every other project's parquets in
+    # place so a single project can be re-derived (or a new table appended)
+    # without re-running — or re-uploading — the whole cohort.
+    # A --table build must not wipe the tables it isn't rebuilding, so the
+    # project-level wipe is skipped entirely; write_tables overwrites each
+    # named table's parquet in place.
+    if only is None:
+        _clear_processed(processed_dir, project)
 
-    projects: list[str] = []
-    gdc_releases: dict[str, str] = {}
     for path in project_files:
         proj = path.parent.name
-        projects.append(proj)
         cases = json.loads(path.read_text())
-        tables = tabular.build_tables(cases, path.parent)
+        tables = tabular.build_tables(cases, path.parent, only=only)
         # Re-derive survival endpoints (Liu et al. 2018 algorithm) — same
         # in-memory enrichment the consolidated `build` does. Lands on
         # `tables["cases"][i]["survival_derived"]`; tabular.write_tables
         # then projects it into the standalone `survival_derived` table.
-        supp_dir = path.parent / "clinical_supplement"
-        supps = clinical_supplement.load_supplements_for_project(supp_dir)
-        if supps:
-            clinical_supplement.attach_supplements(tables["cases"], supps)
-        survival.attach_survival(tables["cases"])
-        # Project the derived survival values into the dedicated table.
-        tables["survival_derived"] = tabular.derived_survival_rows(tables["cases"])
+        # Skipped when neither table was requested — nothing would read it.
+        os_note = ""
+        if "cases" in tables:
+            supp_dir = path.parent / "clinical_supplement"
+            supps = clinical_supplement.load_supplements_for_project(supp_dir)
+            if supps:
+                clinical_supplement.attach_supplements(tables["cases"], supps)
+            survival.attach_survival(tables["cases"])
+            n_cases = len(tables["cases"])
+            n_os = sum(
+                1
+                for r in tables["cases"]
+                if (r.get("survival_derived") or {}).get("os_event") is not None
+            )
+            os_note = f"  os={n_os}/{n_cases}"
+            if only is None or "survival_derived" in only:
+                tables["survival_derived"] = tabular.derived_survival_rows(tables["cases"])
+            else:
+                # `cases` was only pulled in as a dependency; don't write it.
+                tables.pop("cases")
 
         sizes = {name: len(rows) for name, rows in tables.items()}
         # Compact one-line summary of row counts per table — easier to spot
         # cardinality regressions than scrolling through 14 lines per project.
         summary = " ".join(f"{name}={n}" for name, n in sizes.items())
-        n_os = sum(
-            1 for r in tables["cases"]
-            if (r.get("survival_derived") or {}).get("os_event") is not None
-        )
-        typer.echo(f"  {proj:<12} {summary}  os={n_os}/{len(tables['cases'])}")
+        typer.echo(f"  {proj:<12} {summary}{os_note}")
 
         out_paths = tabular.write_tables(tables, processed_dir, proj)
         # Use any one table's path to print the project's output dir.
-        typer.echo(f"             -> {next(iter(out_paths.values())).parent.parent}")
+        # write_tables returns {} when every requested table was a
+        # flex-schema one with no rows (nothing is written for those).
+        if out_paths:
+            typer.echo(f"             -> {next(iter(out_paths.values())).parent.parent}")
 
-        status_path = path.parent / "gdc_status.json"
-        if status_path.exists():
-            status = json.loads(status_path.read_text())
-            gdc_releases[proj] = status.get("data_release", "<unknown>")
+    projects, gdc_releases = _card_inputs(raw_dir, processed_dir, "*/data.parquet")
 
     # Tables list combines the fixed-schema TABULAR_TABLES with the
     # flex-schema clinical_supplement_* tables (one per BCR biotab form);
