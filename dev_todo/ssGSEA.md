@@ -679,3 +679,41 @@ at n=5, 62% at n=10, 17% at n=100) with no natural breakpoint, and large
 sets are the *most* stable. So: no maximum. A minimum is still defensible
 on stability grounds; the exact floor is a judgement call, and the
 per-pathway gene counts we ship let consumers set their own.
+
+## Which collections to ship, measured (2026-08-12)
+
+Coverage of every plausible MSigDB 2026.1.Hs collection against our
+20,347-symbol universe. `mean match` is the average fraction of a set's
+genes present; `<90%` is the share of sets below 90% covered.
+
+| collection | sets | mean match | <90% | verdict |
+|---|---|---|---|---|
+| C2:CP:PID | 196 | 0.9969 | 0.5% | **include** — NCI-Nature cancer signalling, best coverage measured |
+| C2:CP:BIOCARTA | 292 | 0.9922 | 3.1% | optional — clean but older curation, small sets |
+| C4:CM cancer modules | 431 | 0.9904 | 0.0% | optional — oncology-specific, 2005-era method |
+| C3:MIR miRNA targets | 2,377 | 0.9857 | 0.6% | optional — these are *targets* (mRNAs), so unaffected by the miRNA problem |
+| C4:CGN neighbourhoods | 427 | 0.9852 | 0.2% | optional |
+| C4:3CA cancer cell atlas | 148 | 0.9780 | 4.7% | **include** — scRNA-derived tumour-cell meta-programs |
+| C7 ImmuneSigDB | 4,872 | 0.9744 | 3.8% | defer — largely mouse vaccine/perturbation contrasts |
+| C6 oncogenic signatures | 189 | 0.9723 | 1.6% | **include** — the one collection built for oncogene/TSG readout |
+| C5 GO:BP | 7,538 | 0.9637 | 10.2% | defer — generic and large |
+| C8 cell-type signatures | 866 | 0.9110 | 28.3% | maybe — relevant to TIME but lncRNA-heavy markers |
+| C3:TFT TF targets | 506 | 0.7672 | 97.2% | **no** — needs ~16.9k lncRNA in the universe |
+| C1 positional/cytoband | 302 | 0.3926 | 100.0% | **no** — cytobands enumerate pseudogenes; CNV is the right instrument |
+| C2:CP:KEGG legacy | 186 | — | — | **no** — restricted licence |
+
+**Proposed v2: Reactome + C6 + C4:3CA + C2:CP:PID.** A broad canonical
+backbone plus the three oncology-specific collections, all above 0.97
+coverage. 533 sets beyond Reactome, ~6.1M rows, ~75 MB.
+
+**WikiPathways is deferred until TCGA miRNA-Seq is in the dataset.** Its
+weak sets are miRNA-centric and this assay cannot measure them, so shipping
+it now would publish 49 sets scoring something other than what their names
+claim. That is a modality gap, not a curation gap: the fix is the separate
+miRNA Expression Quantification assay (11,441 files), after which
+WikiPathways coverage should be re-measured rather than assumed.
+
+Note the general lesson: a collection's usability here is decided by whether
+its genes live in the assay's universe, not by how good the curation is.
+C3:TFT is well curated and unusable; C1 is fine and unusable. Measure
+coverage before adding any collection.
