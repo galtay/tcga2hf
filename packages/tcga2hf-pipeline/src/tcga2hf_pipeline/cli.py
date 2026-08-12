@@ -18,8 +18,10 @@ from tcga2hf_pipeline import (
     expression,
     genomic,
     hf_upload,
+    msigdb,
     mutations,
     pathology,
+    ssgsea,
     survival,
     tabular,
 )
@@ -356,6 +358,39 @@ def fetch_cdr_cmd(
     typer.echo(f"  wrote -> {out_path}")
     index = cdr.load_cdr_index(raw_dir)
     typer.echo(f"  CDR rows indexed: {len(index)}")
+
+
+@app.command("fetch-msigdb")
+def fetch_msigdb_cmd(
+    collection: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--collection",
+            help=(
+                "MSigDB collection (repeatable). Defaults to hallmark. "
+                f"Known: {', '.join(sorted(msigdb.COLLECTIONS))}."
+            ),
+        ),
+    ] = None,
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Fetch md5-pinned MSigDB gene-set collections (GMT) for ssGSEA scoring.
+
+    Lands in `<data-dir>/raw/msigdb/`. Gene-set membership changes between
+    MSigDB releases and feeds straight into every score, so the version is
+    pinned in `msigdb.MSIGDB_VERSION` and each file's md5 is verified.
+    """
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    typer.echo(f"raw dir: {raw_dir}")
+    typer.echo(f"MSigDB:  {msigdb.MSIGDB_VERSION}")
+    for key in collection or ["hallmark"]:
+        path = msigdb.fetch_collection(key, raw_dir)
+        sets = ssgsea.load_gmt(path)
+        sizes = sorted(len(v) for v in sets.values())
+        typer.echo(
+            f"  {key:<10} {len(sets):>5} sets  sizes {sizes[0]}-{sizes[-1]}  -> {path.name}"
+        )
 
 
 @app.command("build")

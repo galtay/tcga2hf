@@ -1,0 +1,7 @@
+library(GSVA); library(GSEABase)
+expr <- as.matrix(read.delim("fixture_expr.tsv", row.names=1, check.names=FALSE))
+gsc  <- getGmt("fixture_sets.gmt")
+cat("GSVA", as.character(packageVersion("GSVA")), "expr", dim(expr), "sets", length(gsc), "\n")
+raw <- gsva(ssgseaParam(expr, gsc, minSize=10, maxSize=500, alpha=0.25, normalize=FALSE))
+write.csv(round(raw, 10), "fixture_expected_raw.csv")
+cat("kept sets:", rownames(raw), "\n")

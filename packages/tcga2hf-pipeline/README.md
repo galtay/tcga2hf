@@ -48,6 +48,7 @@ tcga2hf-pipeline fetch-clinical           # GDC -> raw cases.json per project
 tcga2hf-pipeline fetch-mutations          # GDC -> Masked Somatic Mutation MAFs from WXS (DNA)
 tcga2hf-pipeline fetch-expression         # GDC -> Gene Expression Quantification TSVs from RNA-Seq (STAR counts)
 tcga2hf-pipeline fetch-pathology-reports  # GDC -> Pathology Report PDFs (scanned BCR documents)
+tcga2hf-pipeline fetch-msigdb             # Broad -> md5-pinned MSigDB gene sets (GMT) for ssGSEA
 tcga2hf-pipeline build                    # raw -> consolidated per-project parquets + dataset card
 tcga2hf-pipeline build-tabular            # raw -> per-(project, table) parquets + dataset card
 tcga2hf-pipeline upload                   # push processed/ to the consolidated HF dataset repo

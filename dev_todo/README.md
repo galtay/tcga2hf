@@ -10,3 +10,8 @@ when there's room.
   practice of reproducing published TCGA pan-cancer results from raw data and
   validating per-case agreement. Liu 2018 CDR wired in as the template;
   Hoadley 2018 iClusters queued as the next target.
+- [`ssGSEA.md`](ssGSEA.md) — pathway activity as a derived molecular
+  modality. Scoping plus a 100-sample proof-of-concept; the implementation
+  and its GSVA validation are now in the repo
+  (`tcga2hf_pipeline.ssgsea`, `dev_research/ssgsea/`). What remains is the
+  cohort-wide run and the published table.
