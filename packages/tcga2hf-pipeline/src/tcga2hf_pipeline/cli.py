@@ -455,6 +455,35 @@ def build_cmd(
             expression.attach(rows, expr_by_case)
         if path_by_case:
             pathology.attach(rows, path_by_case)
+        # ssGSEA pathway activity, one column per MSigDB collection. The TPM
+        # matrix is memoized across collections: reading every STAR TSV
+        # dominates the cost and the matrix is identical for all of them.
+        from tcga2hf.schema import SSGSEA_COLLECTIONS, ssgsea_patient_column
+
+        msigdb_dir = raw_dir / "msigdb"
+
+        def _memoized_matrix(project_dir: Path):
+            """One TPM matrix per project, shared across collections.
+
+            Built by a factory rather than a closure over a loop variable so
+            the memo cannot outlive the project it belongs to.
+            """
+            cache: list = []
+
+            def _load():
+                if not cache:
+                    cache.append(expression.tpm_matrix_for_project(project_dir))
+                return cache[0]
+
+            return _load
+
+        _matrix = _memoized_matrix(path.parent)
+        n_ssgsea = 0
+        for _coll in SSGSEA_COLLECTIONS:
+            by_case = ssgsea.load_for_project(path.parent, _coll, msigdb_dir, _matrix)
+            if by_case:
+                ssgsea.attach(rows, by_case, ssgsea_patient_column(_coll))
+                n_ssgsea += sum(len(v) for v in by_case.values())
         # Attach BCR biotab Clinical Supplement data if it's been fetched.
         # survival.attach_survival reads `row["clinical_supplement"]` for the
         # ~2.4×-better-populated `treatment_outcome_first_course` field,
@@ -478,7 +507,7 @@ def build_cmd(
             f"  {proj:<12} {len(rows):>4} patients  "
             f"mutations={n_variants:>5} ({len(mut_by_case)} MAFs)  "
             f"expression={n_expr:>4} aliquots ({len(expr_by_case)} TSVs)  "
-            f"path_reports={n_path:>4}  "
+            f"path_reports={n_path:>4}  ssgsea={n_ssgsea:>4}  "
             f"os={n_os}/{len(rows)}"
         )
 

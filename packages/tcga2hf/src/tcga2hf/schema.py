@@ -706,6 +706,45 @@ PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
 ]
 
 # ---------------------------------------------------------------------------
+# Derived: ssGSEA pathway activity, one record per scored RNA-Seq aliquot
+#
+# Struct-of-arrays, mirroring EXPRESSION_FIELDS: the consolidated layout
+# already stores per-aliquot vectors that way, and it keeps a patient row to
+# one record per aliquot per collection rather than one per (aliquot,
+# pathway). `pathway` and the value arrays are index-aligned.
+#
+# The tabular layout's flat `ssgsea_scores_<collection>` table is the same
+# numbers unpivoted; see that schema for why only the raw score is stored.
+# ---------------------------------------------------------------------------
+
+SSGSEA_FIELDS: list[pa.Field] = [
+    pa.field("sample_id", pa.string()),
+    pa.field("aliquot_id", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    pa.field("pathway", pa.list_(pa.string())),
+    pa.field("pathway_url", pa.list_(pa.string())),
+    pa.field("matched_gene_count", pa.list_(pa.int32())),
+    pa.field("original_gene_count", pa.list_(pa.int32())),
+    pa.field("score_raw", pa.list_(pa.float64())),
+]
+
+
+def ssgsea_patient_column(collection: str) -> str:
+    return f"samples_ssgsea_{collection}"
+
+
+# WikiPathways is deliberately absent: its weak sets are miRNA-centric and
+# this assay cannot measure miRNAs. See `tcga2hf_pipeline.msigdb`.
+SSGSEA_COLLECTIONS: list[str] = [
+    "hallmark",
+    "reactome",
+    "pid",
+    "oncogenic",
+    "cancer_cell_atlas",
+]
+
+
+# ---------------------------------------------------------------------------
 # Top-level patient row
 # ---------------------------------------------------------------------------
 
@@ -742,6 +781,9 @@ PATIENT_FIELDS: list[pa.Field] = [
         pa.list_(pa.struct(EXPRESSION_FIELDS)),
     ),
     pa.field("samples_pathology_report", pa.list_(pa.struct(PATHOLOGY_REPORT_FIELDS))),
+    # One column per MSigDB collection, so a consumer can project just the
+    # collection they need. Generated below from SSGSEA_COLLECTIONS, which
+    # is defined after this list.
     # Survival endpoints — re-derived from the current GDC data using the
     # algorithm published by Liu et al. 2018 (Cell, TCGA Pan-Cancer Clinical
     # Data Resource). Implementation in `tcga2hf_pipeline.survival`;
@@ -772,7 +814,13 @@ PATIENT_FIELDS: list[pa.Field] = [
     ])),
 ]
 
-PATIENTS = pa.schema(PATIENT_FIELDS)
+# ssGSEA columns are appended after SSGSEA_COLLECTIONS is declared (below),
+# so PATIENT_FIELDS stays the single ordered source of truth for the row.
+def _append_ssgsea_patient_fields() -> None:
+    for _collection in SSGSEA_COLLECTIONS:
+        PATIENT_FIELDS.append(
+            pa.field(ssgsea_patient_column(_collection), pa.list_(pa.struct(SSGSEA_FIELDS)))
+        )
 
 
 # Sub-fields of the `survival_derived` struct. Single source of truth for
@@ -822,6 +870,7 @@ TABULAR_CASES_FIELDS: list[pa.Field] = [
         "samples_masked_somatic_mutation",
         "samples_gene_expression_quantification",
         "samples_pathology_report",
+        *(ssgsea_patient_column(c) for c in SSGSEA_COLLECTIONS),
     }
 ]
 
@@ -920,15 +969,6 @@ TABULAR_PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
 # later, and still yield the normalized view on demand — the divisor is
 # recoverable from the stats table as MAX(max) - MIN(min) over its
 # `pan_cancer` rows.
-# WikiPathways is deliberately absent: its weak sets are miRNA-centric and
-# this assay cannot measure miRNAs. See `tcga2hf_pipeline.msigdb`.
-SSGSEA_COLLECTIONS: list[str] = [
-    "hallmark",
-    "reactome",
-    "pid",
-    "oncogenic",
-    "cancer_cell_atlas",
-]
 
 TABULAR_SSGSEA_SCORES_FIELDS: list[pa.Field] = [
     *_CASE_FKS,
@@ -979,6 +1019,10 @@ TABULAR_SSGSEA_STATS_FIELDS: list[pa.Field] = [
     pa.field("q75", pa.float64()),
     pa.field("max", pa.float64()),
 ]
+
+
+_append_ssgsea_patient_fields()
+PATIENTS = pa.schema(PATIENT_FIELDS)
 
 
 def ssgsea_scores_table(collection: str) -> str:

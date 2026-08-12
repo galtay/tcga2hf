@@ -228,3 +228,112 @@ def map_gene_sets(
         if keep:
             kept[name] = idx
     return kept, stats
+
+
+# ---------------------------------------------------------------------------
+# Consolidated (patient) layout
+#
+# The tabular layout emits one row per (aliquot, pathway); the patient layout
+# wants one struct-of-arrays record per aliquot, matching how expression is
+# stored there. Both derive from the same `ssgsea_scores` call, so the two
+# published views carry identical numbers by construction.
+# ---------------------------------------------------------------------------
+
+
+def score_project(
+    project_raw_dir,
+    collection: str,
+    msigdb_dir,
+    load_matrix=None,
+) -> tuple[list[str], np.ndarray, list[dict[str, object]], dict[str, dict[str, object]]]:
+    """Score one project against one collection.
+
+    Returns `(pathway_names, scores, aliquot_records, geneset_stats)` where
+    `scores` is pathways x aliquots. Imports the expression reader lazily so
+    this module stays importable with numpy alone.
+    """
+    from tcga2hf_pipeline import expression as _expression
+    from tcga2hf_pipeline import msigdb as _msigdb
+
+    gmt_path = msigdb_dir / _msigdb.COLLECTIONS[collection].file_name
+    if not gmt_path.exists():
+        return [], np.empty((0, 0)), [], {}
+    loader = load_matrix or (lambda: _expression.tpm_matrix_for_project(project_raw_dir))
+    genes, matrix, records = loader()
+    if not records:
+        return [], np.empty((0, 0)), [], {}
+    kept, stats = map_gene_sets(load_gmt(gmt_path), genes)
+    if not kept:
+        return [], np.empty((0, 0)), [], {}
+    names = list(kept)
+    scores = ssgsea_scores(matrix.astype(np.float64), [kept[n] for n in names])
+    return names, scores, records, {s["pathway"]: s for s in stats}
+
+
+def load_for_project(
+    project_raw_dir,
+    collection: str,
+    msigdb_dir,
+    load_matrix=None,
+) -> dict[str, list[dict[str, object]]]:
+    """Return `{case_id: [per-aliquot struct-of-arrays record, ...]}`.
+
+    Shaped for the consolidated patient row: one record per scored aliquot,
+    with `pathway` / `pathway_url` / gene counts / `score_raw` as
+    index-aligned arrays.
+    """
+    from tcga2hf_pipeline import msigdb as _msigdb
+
+    names, scores, records, stats = score_project(
+        project_raw_dir, collection, msigdb_dir, load_matrix
+    )
+    if not names:
+        return {}
+    urls = [_msigdb.geneset_url(n) for n in names]
+    matched = [int(stats[n]["matched_gene_count"]) for n in names]
+    original = [int(stats[n]["original_gene_count"]) for n in names]
+
+    by_case: dict[str, list[dict[str, object]]] = {}
+    for j, rec in enumerate(records):
+        by_case.setdefault(rec["case_id"], []).append(
+            {
+                "sample_id": None,  # resolved in `attach` from the patient's samples
+                "aliquot_id": rec["aliquot_id"],
+                "source_file_id": rec["source_file_id"],
+                "pathway": names,
+                "pathway_url": urls,
+                "matched_gene_count": matched,
+                "original_gene_count": original,
+                "score_raw": [float(v) for v in scores[:, j]],
+            }
+        )
+    return by_case
+
+
+def attach(
+    rows: list[dict[str, object]],
+    by_case: dict[str, list[dict[str, object]]],
+    column: str,
+) -> list[dict[str, object]]:
+    """Populate `column` on each patient row, resolving each record's sample_id.
+
+    Mirrors `expression.attach`: the patient row's `samples` tree is the
+    source of truth for which sample an aliquot belongs to.
+    """
+    for row in rows:
+        records = by_case.get(row["case_id"], [])
+        aliquot_to_sample: dict[str, str] = {}
+        for s in row.get("samples") or []:
+            sid = s.get("sample_id")
+            if not sid:
+                continue
+            for portion in s.get("portions") or []:
+                for analyte in portion.get("analytes") or []:
+                    for a in analyte.get("aliquots") or []:
+                        if a.get("aliquot_id"):
+                            aliquot_to_sample[a["aliquot_id"]] = sid
+        for r in records:
+            r["sample_id"] = aliquot_to_sample.get(r["aliquot_id"])
+        records.sort(key=lambda r: r.get("aliquot_id") or "")
+        row[column] = records
+    return rows

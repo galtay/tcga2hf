@@ -159,6 +159,7 @@ _PATIENT_VIEW_MAPPING = """\
 | Gene Expression Quantification | `samples_gene_expression_quantification` array on each patient row (`stranded_first` / `stranded_second` dropped — GDC harmonizes as unstranded) |
 | BCR Clinical Supplements | `clinical_supplement` struct on each patient row, with sub-fields `patient` (1 dict) and `follow_ups` / `ntes` / `drugs` / `radiations` / `ablations` / `omfs` (lists of dicts). Sub-fields with no data for the project are omitted. |
 | Pathology Reports | `samples_pathology_report` array on each patient row; `pdf_bytes` holds the scanned PDF verbatim, joined to its sample via `pathology_report_uuid` |
+| MSigDB gene sets + RNA-Seq | `samples_ssgsea_<collection>` array columns — pathway activity per aliquot; see the ssGSEA section below |
 """
 
 
@@ -486,8 +487,12 @@ def _tabular_configs_yaml(
 # ===========================================================================
 
 
-def _ssgsea_section() -> str:
-    """Section describing the ssGSEA tables, with links to every collection.
+def _ssgsea_section(*, consolidated: bool) -> str:
+    """Section describing the ssGSEA data, with links to every collection.
+
+    Shared by both cards; only the shape sentence and the normalization
+    pointer differ, since the reference distributions live in the tabular
+    view's `ssgsea_stats_*` tables and have no consolidated counterpart.
 
     Templated from `msigdb.COLLECTIONS` so the documented collections and
     md5s cannot drift from what the pipeline actually fetches.
@@ -504,16 +509,52 @@ def _ssgsea_section() -> str:
             f"`{c.file_name}` | `{c.md5}` |"
         )
     table = "\n".join(rows)
+    if consolidated:
+        shape = (
+            "Single-sample gene set enrichment scores for every RNA-Seq\n"
+            "aliquot, in one `samples_ssgsea_<collection>` column per MSigDB\n"
+            "collection. Each entry is one scored aliquot, with `pathway`,\n"
+            "`pathway_url`, the gene counts and `score_raw` as index-aligned\n"
+            "arrays — the same struct-of-arrays shape\n"
+            "`samples_gene_expression_quantification` uses."
+        )
+        normalization = (
+            "The reference distributions needed to normalize live in the\n"
+            "[tabular view][tabular]'s `ssgsea_stats_<collection>` tables, which\n"
+            "have no counterpart here: they are cohort-level aggregates, and\n"
+            "this view is one row per patient. Load them from there to\n"
+            "z-score against a population, or to recover GSVA's divisor as\n"
+            "`MAX(max) - MIN(min)` over their `pan_cancer` rows. The scores\n"
+            "themselves are identical in both views."
+        )
+    else:
+        shape = (
+            "Single-sample gene set enrichment scores for every RNA-Seq\n"
+            "aliquot, one `ssgsea_scores_<collection>` table per MSigDB\n"
+            "collection plus a matching `ssgsea_stats_<collection>` table of\n"
+            "reference distributions."
+        )
+        normalization = (
+            "The `ssgsea_stats_*` tables carry that composition-dependent\n"
+            "information instead. Each project ships its own reference\n"
+            "distributions **and** the pan-cancer ones, so you can normalize\n"
+            "without scanning every config:\n\n"
+            "- **GSVA-equivalent normalization**: divide by\n"
+            "  `MAX(max) - MIN(min)` over the `pan_cancer` rows.\n"
+            "- **z-score against a reference population**:\n"
+            "  `(score_raw - mean) / sd` for the `population` and\n"
+            "  `sample_type` you care about.\n\n"
+            "Everything in `ssgsea_stats_*` is derivable from\n"
+            "`ssgsea_scores_*` by aggregation; it is a materialized\n"
+            "convenience view, not independent evidence."
+        )
     return f"""\
 ## Pathway activity (ssGSEA)
 
-Single-sample gene set enrichment scores for every RNA-Seq aliquot, one
-`ssgsea_scores_<collection>` table per MSigDB collection plus a matching
-`ssgsea_stats_<collection>` table of reference distributions.
+{shape}
 
-Every row carries `pathway_url`, linking to the authoritative MSigDB
-definition of that gene set — so what a score means is one click away
-from the score itself.
+`pathway_url` links to the authoritative MSigDB definition of each gene
+set — so what a score means is one click away from the score itself.
 
 ### Collections
 
@@ -559,18 +600,71 @@ and collection composition — adding Reactome to a Hallmark run widens
 that divisor by ~49% on this data, silently restating previously
 published scores.
 
-The `ssgsea_stats_*` tables carry that composition-dependent information
-instead. Each project ships its own reference distributions **and** the
-pan-cancer ones, so you can normalize without scanning every config:
+{normalization}
+"""
 
-- **GSVA-equivalent normalization**: divide by
-  `MAX(max) - MIN(min)` over the `pan_cancer` rows.
-- **z-score against a reference population**: `(score_raw - mean) / sd`
-  for the `population` and `sample_type` you care about.
 
-Everything in `ssgsea_stats_*` is derivable from `ssgsea_scores_*` by
-aggregation; it is a materialized convenience view, not independent
-evidence.
+# ===========================================================================
+# Pathology reports (shared; shape sentence differs per view)
+# ===========================================================================
+
+
+def _pathology_section(*, consolidated: bool) -> str:
+    """Section describing the scanned pathology reports.
+
+    Worth its own section rather than a row in the source table: it is the
+    only modality here that ships a source document rather than parsed
+    values, and the decision not to extract text is one consumers need to
+    know about before they reach for a `text` column that does not exist.
+    """
+    if consolidated:
+        shape = (
+            "Each patient row carries a `samples_pathology_report` array; "
+            "`pdf_bytes` holds the document."
+        )
+    else:
+        shape = (
+            "The `pathology_report` table has one row per report, with the "
+            "document in `pdf_bytes`."
+        )
+    return f"""\
+## Pathology reports
+
+Scanned surgical pathology reports as GDC serves them — **11,208 reports
+covering 11,121 cases across 32 projects**. {shape}
+
+TCGA-LAML has none, which is expected rather than missing: acute myeloid
+leukaemia has no surgical resection specimen to report on.
+
+### The bytes, not a text extraction
+
+The PDFs are carried **verbatim, with no text extraction applied**. Any
+parse is specific to the tool and version that produced it, so extracting
+at publication time would freeze one tool's output into the dataset and
+lose the original. Shipping the source document means a better parser can
+be run later without re-downloading from GDC, and a canonical parse — if
+one is added — becomes an additional clearly-labelled column rather than
+a replacement.
+
+Practical notes for anyone parsing them:
+
+- These are page scans. Most carry an OCR text layer added upstream of
+  GDC, so a pure-Python extractor returns several hundred to a few
+  thousand characters for nearly every report — but that layer transcribes
+  the barcode strip and handwritten margin notes as noise, and its
+  fidelity varies by submitting institution.
+- Patient identifiers are redacted out of the page image by GDC before
+  distribution.
+
+### Joining to a sample
+
+Every report links to the sample it describes. The GDC file name is
+`<case_submitter_id>.<REPORT_UUID>.PDF`, and that UUID is the same value
+GDC reports on `sample.pathology_report_uuid` — a key this dataset has
+always carried, so reports join to samples without anything new being
+invented. Where GDC names the sample directly in the file's
+`associated_entities`, that is preferred, with the file-name UUID as
+fallback.
 """
 
 
@@ -608,6 +702,8 @@ tags:
             _header(consolidated=True, timestamp=timestamp, release_md=release_md),
             _data_model(consolidated=True),
             _shared_survival_endpoints(consolidated=True),
+            _pathology_section(consolidated=True),
+            _ssgsea_section(consolidated=True),
             _PATIENT_LOADING,
             _GDC_REFERENCES,
             _LICENSE_AND_REDISTRIBUTION,
@@ -658,7 +754,8 @@ tags:
             _data_model(consolidated=False),
             _shared_survival_endpoints(consolidated=False),
             # ssGSEA is tabular-only; the consolidated card omits it.
-            _ssgsea_section(),
+            _pathology_section(consolidated=False),
+            _ssgsea_section(consolidated=False),
             _TABULAR_LOADING,
             _GDC_REFERENCES,
             _LICENSE_AND_REDISTRIBUTION,

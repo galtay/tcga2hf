@@ -17,6 +17,7 @@ from tcga2hf.schema import (
     PATIENTS,
     PORTION_FIELDS,
     SAMPLE_FIELDS,
+    SSGSEA_COLLECTIONS,
     TREATMENT_FIELDS,
 )
 
@@ -162,6 +163,7 @@ def _patient_row(case: dict[str, Any]) -> dict[str, Any]:
         "samples_masked_somatic_mutation": [],
         "samples_gene_expression_quantification": [],
         "samples_pathology_report": [],
+        **{f"samples_ssgsea_{_c}": [] for _c in SSGSEA_COLLECTIONS},
         # Re-derived survival endpoints (Liu et al. 2018 algorithm). Build
         # step fills the struct via `survival.attach_survival`. Initialized
         # here as an all-null struct so pyarrow's `from_pylist(rows, schema=PATIENTS)`

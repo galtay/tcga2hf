@@ -67,6 +67,8 @@ from tcga2hf.schema import (
     PATIENT_FIELDS,
     PORTION_FIELDS,
     SAMPLE_FIELDS,
+    SSGSEA_COLLECTIONS,
+    SSGSEA_FIELDS,
     TREATMENT_FIELDS,
 )
 
@@ -237,7 +239,7 @@ FamilyHistory = _make_entity("FamilyHistory", FAMILY_HISTORY_FIELDS)
 # algorithm. See `tcga2hf_pipeline.survival` and the validation report at
 # `dev_research/liu_2018/report.html` for methodology and per-endpoint
 # agreement rates against Liu's curated 2018 CDR.
-from tcga2hf.schema import SURVIVAL_DERIVED_FIELDS  # noqa: E402
+from tcga2hf.schema import SURVIVAL_DERIVED_FIELDS, ssgsea_patient_column  # noqa: E402
 
 SurvivalDerived = _make_entity("SurvivalDerived", SURVIVAL_DERIVED_FIELDS)
 
@@ -327,6 +329,44 @@ class PathologyReport(_PathologyReportBase):
         return out
 
 
+_SsgseaScoresBase = _make_entity(
+    "_SsgseaScoresBase",
+    SSGSEA_FIELDS,
+    required=("aliquot_id",),
+)
+
+
+class SsgseaScores(_SsgseaScoresBase):
+    """ssGSEA pathway activity for one RNA-Seq aliquot and one MSigDB collection.
+
+    Struct-of-arrays: `pathway`, `pathway_url`, the gene counts and
+    `score_raw` are index-aligned, the same shape `GeneExpression` uses.
+    Use `get_pathway` to look one up by name.
+
+    Only the raw score is stored. GSVA's normalization divides by the range
+    of the whole score matrix, which would make each value depend on the
+    cohort and collection it was scored alongside; the tabular dataset's
+    `ssgsea_stats_*` tables carry those reference distributions instead.
+    """
+
+    def get_pathway(self, name: str) -> dict[str, Any] | None:
+        """Return this aliquot's entry for `name`, or None if absent."""
+        try:
+            i = self.pathway.index(name)
+        except (ValueError, AttributeError):
+            return None
+        return {
+            "pathway": self.pathway[i],
+            "pathway_url": self.pathway_url[i],
+            "matched_gene_count": self.matched_gene_count[i],
+            "original_gene_count": self.original_gene_count[i],
+            "score_raw": self.score_raw[i],
+        }
+
+    def as_dict(self) -> dict[str, float]:
+        """{pathway: score_raw} for this aliquot."""
+        return dict(zip(self.pathway or [], self.score_raw or [], strict=True))
+
 # ---------------------------------------------------------------------------
 # Patient: top-level row entity with cross-modality joins
 # ---------------------------------------------------------------------------
@@ -401,6 +441,10 @@ _TcgaHfPatientBase = _make_entity(
             Field(default_factory=list),
         ),
         "samples_pathology_report": (list[PathologyReport], Field(default_factory=list)),
+        **{
+            ssgsea_patient_column(c): (list[SsgseaScores], Field(default_factory=list))
+            for c in SSGSEA_COLLECTIONS
+        },
         "survival_derived": (SurvivalDerived | None, None),
     },
     required=("case_id", "case_submitter_id", "project_id"),
