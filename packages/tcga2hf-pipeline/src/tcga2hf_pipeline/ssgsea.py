@@ -51,10 +51,26 @@ from pathlib import Path
 
 import numpy as np
 
-# GSVA's ssgseaParam defaults for the parameters we pin.
 DEFAULT_ALPHA = 0.25
+
+# A floor is defensible on stability: leave-one-gene-out sensitivity falls
+# smoothly with set size (a dropped gene moves the score by ~98% of its
+# cross-sample SD at n=5, 62% at n=10, 17% at n=100), so very small sets are
+# noise-dominated. There is no natural breakpoint, and 10 is a judgement
+# call rather than a standard.
 DEFAULT_MIN_SIZE = 10
-DEFAULT_MAX_SIZE = 500
+
+# No ceiling. `maxSize=500` is inherited convention (the Broad's GSEA
+# desktop uses 15/500, gseapy 15/2000) and is *not* a GSVA default — GSVA
+# ships minSize=1, maxSize=Inf. The rationale behind it belongs to
+# permutation-based GSEA, where huge sets are non-specific hypotheses and
+# inflate multiple testing; ssGSEA runs no permutation test and we publish
+# descriptive scores. Empirically large sets are the *most* stable, and set
+# size does not drive score magnitude (Spearman -0.001 against the mean
+# score across 50 Hallmark sets). Dropping a set at build time is
+# unrecoverable, whereas consumers can filter on the per-pathway gene counts
+# we ship on every row.
+DEFAULT_MAX_SIZE: int | None = None
 
 
 def average_rank(x: np.ndarray) -> np.ndarray:
@@ -177,14 +193,21 @@ def map_gene_sets(
     sets: dict[str, list[str]],
     genes: list[str] | np.ndarray,
     min_size: int = DEFAULT_MIN_SIZE,
-    max_size: int = DEFAULT_MAX_SIZE,
+    max_size: int | None = DEFAULT_MAX_SIZE,
 ) -> tuple[dict[str, np.ndarray], list[dict[str, object]]]:
     """Intersect each gene set with `genes`, then filter by post-mapping size.
 
-    Returns `(kept, stats)`. GSVA applies the size filter *after* mapping
-    onto the expression matrix, so the sizes that matter are the matched
-    ones — that is what `stats` reports, per set, for provenance:
-    `original_gene_count`, `matched_gene_count`, `match_fraction`, `kept`.
+    `max_size=None` means no upper bound. Returns `(kept, stats)`. GSVA
+    applies the size filter *after* mapping onto the expression matrix, so
+    the sizes that matter are the matched ones — that is what `stats`
+    reports, per set, for provenance: `original_gene_count`,
+    `matched_gene_count`, `match_fraction`, `kept`.
+
+    `match_fraction` is the more informative filter of the two for
+    consumers. A set can be small because the pathway genuinely has few
+    genes (Reactome's leaf nodes are often 5-9, with matched == declared)
+    or because most of its genes fall outside the expression matrix's gene
+    universe — two different problems that a size floor alone conflates.
     """
     index = {g: i for i, g in enumerate(genes)}
     kept: dict[str, np.ndarray] = {}
@@ -192,7 +215,7 @@ def map_gene_sets(
     for name, members in sets.items():
         unique = set(members)
         idx = np.array(sorted({index[m] for m in unique if m in index}), dtype=np.int64)
-        keep = min_size <= idx.size <= max_size
+        keep = idx.size >= min_size and (max_size is None or idx.size <= max_size)
         stats.append(
             {
                 "pathway": name,

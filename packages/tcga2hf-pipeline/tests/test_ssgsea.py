@@ -31,7 +31,9 @@ def _load_fixture() -> tuple[np.ndarray, list[str], dict[str, np.ndarray]]:
     genes = [r[0] for r in rows[1:]]
     expr = np.array([[float(v) for v in r[1:]] for r in rows[1:]], dtype=np.float64)
     sets = ssgsea.load_gmt(SETS_GMT)
-    kept, _ = ssgsea.map_gene_sets(sets, genes)
+    # Pinned to the filter the GSVA reference run used, so the comparison
+    # keeps testing the same thing if the pipeline defaults change.
+    kept, _ = ssgsea.map_gene_sets(sets, genes, min_size=10, max_size=500)
     return expr, genes, kept
 
 
@@ -306,3 +308,20 @@ def test_stats_rows_absent_when_no_scores(tmp_path: Path) -> None:
     from tcga2hf_pipeline import tabular
 
     assert tabular.ssgsea_stats_rows(tmp_path, "hallmark") == {}
+
+
+def test_no_maximum_size_by_default(tmp_path: Path) -> None:
+    """A very large gene set must survive the default filter.
+
+    maxSize=500 is inherited GSEA-desktop convention, not a GSVA default,
+    and dropping a set at build time is unrecoverable. Consumers filter on
+    the gene counts we ship instead.
+    """
+    gmt = tmp_path / "s.gmt"
+    gmt.write_text("HUGE\tdesc\t" + "\t".join(f"G{i}" for i in range(1200)) + "\n")
+    genes = [f"G{i}" for i in range(2000)]
+    kept, _ = ssgsea.map_gene_sets(ssgsea.load_gmt(gmt), genes)
+    assert kept["HUGE"].size == 1200
+    # ...but an explicit ceiling is still honoured when asked for.
+    kept2, _ = ssgsea.map_gene_sets(ssgsea.load_gmt(gmt), genes, max_size=500)
+    assert "HUGE" not in kept2
