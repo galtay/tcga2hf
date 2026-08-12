@@ -611,3 +611,71 @@ a scratch dir. To make it real:
 [4]: https://www.gsea-msigdb.org/gsea/msigdb?utm_source=chatgpt.com "GSEA | MSigDB"
 [5]: https://bioconductor.org/packages//release/bioc/html/GSVA.html?utm_source=chatgpt.com "Bioconductor - GSVA"
 [6]: https://www.gsea-msigdb.org/gsea/msigdb_license_terms.jsp?utm_source=chatgpt.com "GSEA | License Terms for MSigDB released after April 2017"
+
+---
+
+## Gene universe: protein-coding + functional IG/TR segments (2026-08-12)
+
+Revised after measuring MSigDB coverage. The universe is **protein-coding
+plus the 409 functional immunoglobulin / T-cell-receptor segments**
+(`IG_V/C/D/J_gene`, `TR_V/C/D/J_gene`), `_PAR_Y` dropped — 20,347 symbols.
+
+**Why.** GENCODE gives Ig/TCR segments their own biotypes, so a plain
+protein-coding filter drops all of them, and MSigDB's B-cell-receptor,
+Fc-receptor and complement pathways are largely built from them. The tumour
+immune microenvironment is central to oncology, so under-representing it is
+a real limitation rather than a cosmetic one.
+
+| pathway | before | after |
+|---|---|---|
+| REACTOME_CD22_MEDIATED_BCR_REGULATION | 5/61 (8%) | 61/61 (100%) |
+| REACTOME_FCGR_ACTIVATION | 12/69 (17%) | 69/69 (100%) |
+| REACTOME_SCAVENGING_OF_HEME_FROM_PLASMA | 13/69 (19%) | 69/69 (100%) |
+| REACTOME_INITIAL_TRIGGERING_OF_COMPLEMENT | 22/80 (28%) | 79/80 (99%) |
+
+Cost: existing scores move a median of 0.21 of a pathway's cross-sample SD
+(p95 0.54, per-pathway Spearman >= 0.986). Pseudogene biotypes (~237) are
+excluded — near-uniformly zero, they would only pad the low ranks.
+
+These genes are genuinely measured by this assay: IG_C_gene is 71% above
+1 TPM versus 52% for protein-coding, because B cells transcribe
+polyadenylated Ig mRNA. IGKC ranks ~400 of 60,660 in an infiltrated tumour.
+
+**Caveat to document on the card:** V/D/J segments are somatically
+rearranged and clonally expanded, so their bulk expression reports
+lymphocyte infiltration and clonality rather than regulation of a fixed
+locus. That is what makes them informative about the microenvironment, but
+it is a different kind of measurement from the rest of the matrix.
+
+## Coverage by collection, against that universe
+
+| collection | sets | mean match fraction | sets <90% covered |
+|---|---|---|---|
+| Hallmark | 50 | 0.9964 | 0 |
+| Reactome | 1,839 | 0.9935 | 24 |
+| WikiPathways | 925 | 0.9776 | 49 |
+
+**WikiPathways is the weakest, and its gap is not fixable from this assay.**
+Its poorly-covered sets are miRNA-centric (`WP_MIRNAS_INVOLVED_IN_DNA_DAMAGE_RESPONSE`
+15/68, `WP_CELL_DIFFERENTIATION_INDEX` 14/50), and TCGA RNA-Seq is poly-A
+selected — mature miRNAs are not polyadenylated, so STAR gene counts leave
+them **94.8% exactly zero**. Adding the 1,881 miRNA rows would pad the low
+ranks and inform nothing; adding `Mt_rRNA` would be worse still, dominating
+the top ranks at ~14,600 TPM.
+
+The right instrument is TCGA's separate miRNA-Seq assay (miRNA Expression
+Quantification, 11,441 files) — a future modality, not a gene-universe fix.
+Until then `matched_gene_count` / `original_gene_count` flag the affected
+sets on every row.
+
+## No maximum gene-set size
+
+`maxSize=500` was inherited convention (Broad GSEA desktop uses 15/500;
+gseapy 15/2000), **not a GSVA default — GSVA ships minSize=1, maxSize=Inf**.
+The permutation-testing rationale doesn't transfer: ssGSEA runs no
+permutation test and we publish descriptive scores. Measured leave-one-gene-out
+sensitivity declines smoothly with size (97.9% of a score's cross-sample SD
+at n=5, 62% at n=10, 17% at n=100) with no natural breakpoint, and large
+sets are the *most* stable. So: no maximum. A minimum is still defensible
+on stability grounds; the exact floor is a judgement call, and the
+per-pathway gene counts we ship let consumers set their own.

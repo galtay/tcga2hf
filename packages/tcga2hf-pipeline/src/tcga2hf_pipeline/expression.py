@@ -144,20 +144,57 @@ def load_for_project(project_raw_dir: Path) -> dict[str, list[dict[str, Any]]]:
     return dict(by_case)
 
 
+# GENCODE gives immunoglobulin and T-cell-receptor segments their own
+# biotypes rather than `protein_coding`, so a plain protein-coding filter
+# silently drops all of them. That matters for tumour immunology: IGKC is
+# among the ~400 highest-expressed genes in an infiltrated tumour and
+# TRAC/TRBC2 are top-2500, and MSigDB's B-cell-receptor, Fc-receptor and
+# complement pathways are largely built from these segments — without them
+# REACTOME_CD22_MEDIATED_BCR_REGULATION matches 5 of its 61 genes.
+#
+# We include the functional segments and exclude the ~237 pseudogene
+# biotypes, which are near-uniformly zero and would only pad the low ranks.
+#
+# Caveat worth carrying: V/D/J segments are somatically rearranged and
+# clonally expanded, so their bulk expression reports lymphocyte
+# infiltration and clonality rather than regulation of a fixed locus. That
+# is what makes them informative about the tumour immune microenvironment,
+# but it is a different kind of measurement from the rest of the matrix.
+IMMUNE_RECEPTOR_GENE_TYPES: tuple[str, ...] = (
+    "IG_V_gene",
+    "IG_C_gene",
+    "IG_D_gene",
+    "IG_J_gene",
+    "TR_V_gene",
+    "TR_C_gene",
+    "TR_D_gene",
+    "TR_J_gene",
+)
+
+
 def tpm_matrix_for_project(
     project_raw_dir: Path,
 ) -> tuple[list[str], np.ndarray, list[dict[str, Any]]]:
     """Return `(gene_symbols, tpm_matrix, aliquot_records)` for ssGSEA scoring.
 
     The matrix is genes x aliquots of `tpm_unstranded`, restricted to
-    **protein-coding** genes with the `_PAR_Y` duplicates dropped. Both are
-    load-bearing choices rather than tidying: ssGSEA ranks genes *within the
-    supplied matrix*, so the gene universe changes every score. The ~40k
-    lncRNA / pseudogene rows are mostly zero and would dominate the low
+    **protein-coding genes plus the functional immunoglobulin / T-cell
+    receptor segments** (see `IMMUNE_RECEPTOR_GENE_TYPES`), with the
+    `_PAR_Y` duplicates dropped.
+
+    These are load-bearing choices rather than tidying: ssGSEA ranks genes
+    *within the supplied matrix*, so the gene universe changes every score
+    and cannot be revised after publication without invalidating them. The
+    ~40k lncRNA / pseudogene rows are mostly zero and would dominate the low
     ranks; the `_PAR_Y` entries are duplicate annotations of the X copy that
     GDC's STAR pipeline leaves at exactly 0.0, so dropping them is lossless
     and resolves all but a handful of duplicate symbols. Those few remaining
     duplicates are collapsed by max TPM.
+
+    Adding the 409 immune-receptor segments moves existing scores by a
+    median of 0.21 of a pathway's cross-sample SD (p95 0.54, per-pathway
+    Spearman >= 0.986 across samples) and takes the affected MSigDB immune
+    pathways from 8-28% gene coverage to 99-100%.
 
     All GDC STAR files share one gene model (GENCODE v36) regardless of the
     release they first appeared in, so a single gene index is valid across
@@ -190,7 +227,10 @@ def tpm_matrix_for_project(
     records: list[dict[str, Any]] = []
     for i, (file_path, case_id, aliquot_id, source_file_id) in enumerate(entries):
         df = pd.read_csv(file_path, sep="\t", comment="#", low_memory=False, usecols=cols)
-        df = df[(df["gene_type"] == "protein_coding") & (~df["gene_id"].str.contains("PAR_Y"))]
+        in_universe = df["gene_type"].eq("protein_coding") | df["gene_type"].isin(
+            IMMUNE_RECEPTOR_GENE_TYPES
+        )
+        df = df[in_universe & (~df["gene_id"].str.contains("PAR_Y"))]
         series = df.groupby("gene_name")["tpm_unstranded"].max()
         if gene_index is None:
             gene_index = series.index
