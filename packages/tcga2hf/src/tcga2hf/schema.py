@@ -955,6 +955,142 @@ TABULAR_PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
 ]
 
 
+# Sample-level FKs carried on the per-aliquot molecular tables. `sample_type`
+# is denormalized alongside the ids for the same reason it is on the ssGSEA
+# scores table: tumor-vs-normal is the dominant filter on every molecular
+# measurement, and recovering it otherwise means unnesting `cases.samples`.
+_SAMPLE_FKS: list[pa.Field] = [
+    pa.field("sample_id", pa.string()),
+    pa.field("sample_submitter_id", pa.string()),
+    pa.field("sample_type", pa.string()),
+]
+
+
+# Copy number, segment level — the two data types GDC serves for TCGA.
+#
+# Column names are lowercased from the source headers (`Copy_Number` ->
+# `copy_number`, `Num_Probes` -> `num_probes`). The seg files are not a
+# published spec the way MAF is, their own capitalisation is inconsistent
+# between the two types, and lowercase keeps the columns usable as bare SQL
+# identifiers. Values are untouched.
+#
+# Deliberately absent: `Gene Level Copy Number`. GDC serves it as the same
+# calls projected onto GENCODE v36, at 34 GB per workflow, and the
+# projection is exactly reproducible from `allele_specific_copy_number_segment`
+# — so it is a derivation to add later, not source data we are missing.
+
+# ASCAT is a paired caller, so each file names two aliquots. The tumour one
+# is identified positively — it is the aliquot the file's own `GDC_Aliquot`
+# column reports — rather than by reading sample-type digits out of a
+# barcode. The other associated aliquot is the matched normal.
+#
+# `workflow_type` is a first-class column here, not provenance trivia.
+# ASCAT2, ASCAT3 and AscatNGS all ship for overlapping aliquots, and each
+# fits purity and ploidy independently, so they can disagree — on TCGA-CHOL
+# ASCAT2 and ASCAT3 give the same length-weighted modal copy number for
+# 33 of 36 shared aliquots, and where they differ they differ substantially
+# (one aliquot is modal 2 under ASCAT2 and modal 4 under ASCAT3). ASCAT3
+# also segments more coarsely: 2,469 segments against ASCAT2's 6,580 over
+# the same aliquots. A query that does not filter on `workflow_type` is
+# pooling three different answers to the same question.
+TABULAR_ALLELE_SPECIFIC_CNV_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    *_SAMPLE_FKS,
+    *_ALIQUOT_FKS,
+    pa.field("matched_normal_aliquot_id", pa.string()),
+    pa.field("matched_normal_aliquot_submitter_id", pa.string()),
+    # "ASCAT2" | "ASCAT3" | "AscatNGS".
+    pa.field("workflow_type", pa.string()),
+    # "Genotyping Array" for ASCAT2 / ASCAT3, "WGS" for AscatNGS.
+    pa.field("experimental_strategy", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    # `chr`-prefixed in this data type ("chr1"), bare in the masked segments
+    # ("1"). Carried as each file writes it; see the dataset card.
+    pa.field("chromosome", pa.string()),
+    pa.field("start", pa.int64()),
+    pa.field("end", pa.int64()),
+    # Total integer copy number, and its split into the major and minor
+    # allele. minor == 0 with major > 0 is loss of heterozygosity.
+    pa.field("copy_number", pa.int32()),
+    pa.field("major_copy_number", pa.int32()),
+    pa.field("minor_copy_number", pa.int32()),
+]
+
+# DNAcopy circular-binary-segmentation output with germline CNVs masked out.
+# Unlike the allele-specific type this is a *relative* measurement:
+# `segment_mean` is log2(sample / reference), so 0 is copy-neutral and there
+# is no integer call and no allelic split.
+#
+# The two types agree in direction but are not interchangeable, and the gap
+# is informative rather than noise. Nesting each masked segment inside its
+# containing ASCAT3 segment on TCGA-CHOL (2,590 pairs) gives Spearman +0.56,
+# with median `segment_mean` rising monotonically across integer copy number
+# (CN 0 -> -1.93, CN 1 -> -0.44, CN 2 -> +0.07, CN 4 -> +0.22, CN 8 -> +1.25).
+# The correlation is only moderate because ASCAT corrects for tumour purity
+# and ploidy while DNAcopy's ratio is against a diploid reference: in a
+# hyperdiploid tumour, integer CN 3 is copy-neutral relative to its own
+# baseline but still reads near log2 0 here. Use the allele-specific calls
+# for absolute copy number, the masked segments for reference-relative ratio.
+TABULAR_MASKED_CNV_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    *_SAMPLE_FKS,
+    *_ALIQUOT_FKS,
+    pa.field("workflow_type", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    pa.field("chromosome", pa.string()),
+    pa.field("start", pa.int64()),
+    pa.field("end", pa.int64()),
+    # Array probes supporting the segment — the segment's evidence weight.
+    pa.field("num_probes", pa.int32()),
+    pa.field("segment_mean", pa.float64()),
+]
+
+
+# miRNA-Seq, one row per (aliquot, miRBase v21 mature miRNA). ~1,881 miRNAs
+# per aliquot.
+TABULAR_MIRNA_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    *_SAMPLE_FKS,
+    *_ALIQUOT_FKS,
+    pa.field("source_file_id", pa.string()),
+    pa.field("mirna_id", pa.string()),
+    pa.field("read_count", pa.int64()),
+    pa.field("reads_per_million_mirna_mapped", pa.float64()),
+    # "Y" when reads for this miRNA also aligned elsewhere in the genome, so
+    # its count is not uniquely attributable. GDC ships the flag rather than
+    # dropping the row; we do the same.
+    pa.field("cross_mapped", pa.string()),
+]
+
+
+# Reverse Phase Protein Array. Unique among our molecular modalities in
+# attaching to a *portion* rather than an aliquot, so it carries portion FKs
+# and resolves the sample through the portion.
+#
+# Coverage is the narrowest we ship — 7,827 of 11,428 TCGA cases — because
+# RPPA was only run on a subset, and the antibody panel itself grew over the
+# project's life (`set_id` distinguishes the panel versions). A peptide
+# target absent for a sample may mean "not measured on that panel" rather
+# than "measured as zero".
+TABULAR_PROTEIN_EXPRESSION_FIELDS: list[pa.Field] = [
+    *_CASE_FKS,
+    *_SAMPLE_FKS,
+    pa.field("portion_id", pa.string()),
+    pa.field("portion_submitter_id", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    # MD Anderson's antibody id, stable across panel versions.
+    pa.field("agid", pa.string()),
+    pa.field("lab_id", pa.string()),
+    pa.field("catalog_number", pa.string()),
+    # Antibody panel version this measurement came from ("Old", "V1.2", ...).
+    pa.field("set_id", pa.string()),
+    # The protein or phospho-site, e.g. "AKT_pS473".
+    pa.field("peptide_target", pa.string()),
+    # Replicate-based normalized log2 signal; centred near 0, sign-meaningful.
+    pa.field("protein_expression", pa.float64()),
+]
+
+
 # ssGSEA pathway activity. Two tables per gene-set collection, named
 # `ssgsea_scores_<collection>` and `ssgsea_stats_<collection>` — grouping by
 # kind rather than by collection so every scores table sorts together in the
@@ -1049,6 +1185,10 @@ TABULAR_TABLES: dict[str, pa.Schema] = {
     "files": pa.schema(TABULAR_FILES_FIELDS),
     "survival_derived": pa.schema(TABULAR_SURVIVAL_DERIVED_FIELDS),
     "pathology_report": pa.schema(TABULAR_PATHOLOGY_REPORT_FIELDS),
+    "allele_specific_copy_number_segment": pa.schema(TABULAR_ALLELE_SPECIFIC_CNV_FIELDS),
+    "masked_copy_number_segment": pa.schema(TABULAR_MASKED_CNV_FIELDS),
+    "mirna_expression_quantification": pa.schema(TABULAR_MIRNA_FIELDS),
+    "protein_expression_quantification": pa.schema(TABULAR_PROTEIN_EXPRESSION_FIELDS),
     # One scores + one stats table per gene-set collection. Extending to
     # Reactome or WikiPathways is an entry in SSGSEA_COLLECTIONS; the
     # schemas, emitters and tests are all collection-agnostic.
