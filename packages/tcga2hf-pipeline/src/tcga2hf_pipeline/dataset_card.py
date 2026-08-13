@@ -731,6 +731,23 @@ One formatting difference is carried through from the source rather than
 normalized: `allele_specific_copy_number_segment` writes `chr1`, and
 `masked_copy_number_segment` writes bare `1`.
 
+### A small tail of over-fragmented masked segments
+
+Most masked files hold 60-100 segments (median 77 in TCGA-LAML, 91 in
+TCGA-BRCA, 67 in TCGA-CHOL). A handful hold tens of thousands: **32 of
+22,629 files (0.14%) exceed 200 KB**, the largest carrying 50,780 segments
+against TCGA-BRCA's per-file maximum of 1,029. They cluster in TCGA-LAML
+(12), TCGA-BLCA (9) and TCGA-BRCA (7), and the most extreme are all `-11A-`
+matched normals.
+
+This is the signature of a noisy genotyping array, where circular binary
+segmentation fails to merge and emits many tiny spurious calls. It is
+genuine GDC content and is shipped unmodified, but it is a real trap: an
+unfiltered query over this table gets a few samples contributing tens of
+thousands of junk rows each, enough to skew any per-segment aggregate.
+**`num_probes` is the filter** — the spurious segments are supported by
+very few probes.
+
 ### Gene-level copy number is deliberately absent
 
 GDC also serves `Gene Level Copy Number` — the same calls projected onto
