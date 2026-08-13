@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from tcga2hf.schema import TABULAR_TABLES
 
 from tcga2hf_pipeline import (
+    biospecimen_supplement,
     cdr,
     clinical,
     clinical_supplement,
@@ -331,6 +332,101 @@ def fetch_pathology_reports_cmd(
     )
 
 
+@app.command("fetch-mirna")
+def fetch_mirna_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads open-access miRNA-Seq quantifications.",
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+    max_files: MaxFilesOpt = None,
+) -> None:
+    """Download open-access miRNA Expression Quantification files (miRNA-Seq).
+
+    One file per aliquot, ~1,881 miRBase v21 mature miRNAs each; 11,441
+    across TCGA (~580 MB). Isoform-level quantification is a separate,
+    much larger modality (4 GB) that we don't fetch.
+    """
+    _fetch_modality(
+        project, data_dir, "miRNA Expression Quantification", "mirna", max_files=max_files
+    )
+
+
+@app.command("fetch-protein-expression")
+def fetch_protein_expression_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads open-access RPPA protein expression.",
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+    max_files: MaxFilesOpt = None,
+) -> None:
+    """Download open-access Protein Expression Quantification files (RPPA).
+
+    Reverse Phase Protein Array, ~487 antibodies per portion; 7,906 files
+    across TCGA (~172 MB) covering 7,827 cases — the narrowest of the
+    molecular modalities, since RPPA was only run on a subset.
+    """
+    _fetch_modality(
+        project,
+        data_dir,
+        "Protein Expression Quantification",
+        "protein_expression",
+        max_files=max_files,
+    )
+
+
+@app.command("fetch-copy-number")
+def fetch_copy_number_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads open-access copy number segment files.",
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+    max_files: MaxFilesOpt = None,
+) -> None:
+    """Download open-access copy number segment files (both segment modalities).
+
+    Fetches the two segment-level data types GDC serves for TCGA:
+
+      - Allele-specific Copy Number Segment (23,225 files, ~215 MB) —
+        integer total / major / minor copy number per segment, from ASCAT2,
+        ASCAT3 and AscatNGS.
+      - Masked Copy Number Segment (22,629 files, ~344 MB) — DNAcopy log2
+        ratio segment means with germline CNVs masked out.
+
+    Not fetched: `Gene Level Copy Number`, which is the same calls projected
+    onto GENCODE v36 genes at 34 GB per workflow. That projection is exactly
+    reproducible from the allele-specific segments (verified on TCGA-CHOL:
+    zero mismatches across 3 aliquots / 180k genes, with min/max copy number
+    for boundary-spanning genes recovered as the min/max over overlapping
+    segments), so it belongs in a derivation step rather than a download.
+    """
+    _fetch_modality(
+        project,
+        data_dir,
+        "Allele-specific Copy Number Segment",
+        "copy_number_allele_specific",
+        max_files=max_files,
+    )
+    _fetch_modality(
+        project,
+        data_dir,
+        "Masked Copy Number Segment",
+        "copy_number_masked",
+        max_files=max_files,
+    )
+
+
 @app.command("fetch-clinical-supplements")
 def fetch_clinical_supplements_cmd(
     project: Annotated[
@@ -360,6 +456,45 @@ def fetch_clinical_supplements_cmd(
             out_dir = raw_dir / proj / "clinical_supplement"
             typer.echo(f"fetching Clinical Supplement biotabs for {proj} -> {out_dir}")
             manifest = clinical_supplement.fetch_clinical_supplements(client, proj, out_dir)
+            n_dl = sum(1 for m in manifest if m["_status"] == "downloaded")
+            n_cache = sum(1 for m in manifest if m["_status"] == "cached")
+            kinds = sorted({m["form_kind"] for m in manifest})
+            typer.echo(
+                f"  {len(manifest):>3} files ({n_dl} downloaded, {n_cache} cached)  "
+                f"forms: {', '.join(kinds)}"
+            )
+
+
+@app.command("fetch-biospecimen-supplements")
+def fetch_biospecimen_supplements_cmd(
+    project: Annotated[
+        list[str],
+        typer.Option(
+            "--project",
+            help="TCGA project id (repeatable). Downloads BCR biotab Biospecimen Supplement files.",
+        ),
+    ],
+    data_dir: DataDirOpt = None,
+) -> None:
+    """Download BCR biotab Biospecimen Supplement files (the specimen chain).
+
+    The counterpart to the clinical biotabs: slide-level tumour-nuclei and
+    necrosis percentages, analyte quality ratios, plate / shipment / centre
+    provenance, and the disease-specific site-specific-factor forms. 340
+    files across TCGA (~76 MB). Files land at
+    `<data-dir>/raw/<project>/biospecimen_supplement/`.
+    """
+    root = _resolve_data_dir(data_dir)
+    raw_dir = root / "raw"
+    typer.echo(f"raw dir: {raw_dir}")
+
+    with GDCClient() as client:
+        status = client.status()
+        typer.echo(f"GDC: {status.get('data_release', '<unknown>')} (tag {status.get('tag', '?')})")
+        for proj in project:
+            out_dir = raw_dir / proj / "biospecimen_supplement"
+            typer.echo(f"fetching Biospecimen Supplement biotabs for {proj} -> {out_dir}")
+            manifest = biospecimen_supplement.fetch_biospecimen_supplements(client, proj, out_dir)
             n_dl = sum(1 for m in manifest if m["_status"] == "downloaded")
             n_cache = sum(1 for m in manifest if m["_status"] == "cached")
             kinds = sorted({m["form_kind"] for m in manifest})
@@ -555,9 +690,14 @@ def build_tabular_cmd(
 
     only: set[str] | None = None
     if table:
-        known = set(TABULAR_TABLES) | {
-            f"clinical_supplement_{kind}" for kind in clinical_supplement.TABULAR_FORM_KINDS
-        }
+        known = (
+            set(TABULAR_TABLES)
+            | {f"clinical_supplement_{kind}" for kind in clinical_supplement.TABULAR_FORM_KINDS}
+            | {
+                f"biospecimen_supplement_{kind}"
+                for kind in biospecimen_supplement.TABULAR_FORM_KINDS
+            }
+        )
         unknown = set(table) - known
         if unknown:
             raise typer.BadParameter(
@@ -631,9 +771,14 @@ def build_tabular_cmd(
     # flex-schema clinical_supplement_* tables (one per BCR biotab form);
     # _tabular_configs_yaml filters to (project, table) pairs that
     # actually exist on disk.
-    all_tables = list(TABULAR_TABLES) + [
-        f"clinical_supplement_{kind}" for kind in clinical_supplement.TABULAR_FORM_KINDS
-    ]
+    all_tables = (
+        list(TABULAR_TABLES)
+        + [f"clinical_supplement_{kind}" for kind in clinical_supplement.TABULAR_FORM_KINDS]
+        + [
+            f"biospecimen_supplement_{kind}"
+            for kind in biospecimen_supplement.TABULAR_FORM_KINDS
+        ]
+    )
     card = dataset_card.write_tabular_card(
         processed_dir,
         projects,

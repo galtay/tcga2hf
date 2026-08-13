@@ -81,6 +81,42 @@ MODALITY_FILTERS: dict[str, dict[str, str]] = {
         "data_format": "PDF",
         "data_category": "Clinical",
     },
+    # miRNA-Seq deliberately does NOT pin `data_format`: 11,082 files are
+    # TXT and 359 are TSV (GBM / OV / LUSC, named `*.mirnaseq.*` rather than
+    # `*.mirbase21.*` — the older Genome Analyzer platform). Both carry the
+    # identical four-column layout, so pinning format would silently drop
+    # 359 aliquots.
+    "miRNA Expression Quantification": {
+        "data_category": "Transcriptome Profiling",
+        "experimental_strategy": "miRNA-Seq",
+        "analysis.workflow_type": "BCGSC miRNA Profiling",
+    },
+    "Protein Expression Quantification": {
+        "data_format": "TSV",
+        "data_category": "Proteome Profiling",
+        "experimental_strategy": "Reverse Phase Protein Array",
+    },
+    # The two copy-number segment modalities pin neither
+    # `experimental_strategy` nor `analysis.workflow_type`, and that is
+    # deliberate rather than an oversight:
+    #
+    #   - Allele-specific segments come from three callers (ASCAT2 and
+    #     ASCAT3 on Genotyping Array, AscatNGS on WGS). All three are real
+    #     TCGA content and all three ship. `workflow_type` is carried as a
+    #     column instead, because ASCAT2 and ASCAT3 genuinely disagree —
+    #     they fit ploidy independently, so the same aliquot can be called
+    #     modal CN 2 by one and 3-4 by the other. A consumer must choose.
+    #   - Masked segments are DNAcopy-only today, but the mask (germline
+    #     CNV removal) is the meaningful lock and it's already implied by
+    #     the data_type.
+    "Allele-specific Copy Number Segment": {
+        "data_format": "TXT",
+        "data_category": "Copy Number Variation",
+    },
+    "Masked Copy Number Segment": {
+        "data_format": "TXT",
+        "data_category": "Copy Number Variation",
+    },
 }
 
 

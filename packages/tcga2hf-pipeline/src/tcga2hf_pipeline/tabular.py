@@ -49,6 +49,7 @@ import pandas as pd
 from tcga2hf import schema as _schema_mod
 from tcga2hf.schema import SSGSEA_COLLECTIONS, TABULAR_CASES_FIELDS, TABULAR_TABLES
 
+from tcga2hf_pipeline import biospecimen_supplement as _biospecimen_supplement_mod
 from tcga2hf_pipeline import clinical as _clinical_mod
 from tcga2hf_pipeline import clinical_supplement as _clinical_supplement_mod
 from tcga2hf_pipeline import expression as _expression_mod
@@ -251,6 +252,282 @@ def _pathology_report_rows(
             row["case_submitter_id"] = case.get("submitter_id")
             rows.append(row)
     rows.sort(key=lambda r: (r.get("case_submitter_id") or "", r.get("file_name") or ""))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Copy number, miRNA, protein expression
+#
+# These four emitters share a shape: walk a modality's manifest, resolve the
+# biospecimen FKs off the raw GDC case dict, parse one flat TSV per file.
+# They differ only in which entity the file attaches to and what its columns
+# mean, so the walking and FK resolution are factored out here.
+# ---------------------------------------------------------------------------
+
+
+def _iter_modality_files(
+    project_raw_dir: Path,
+    modality_dir: str,
+    cases: list[dict[str, Any]],
+) -> Any:
+    """Yield `(entry, file_path, case)` for manifest entries present on disk.
+
+    Entries whose bytes weren't downloaded (`_status="manifest_only"`, from a
+    capped fetch) and entries that don't resolve to exactly one known case are
+    skipped — the same contract every other modality loader honours.
+    """
+    mod_dir = project_raw_dir / modality_dir
+    manifest_path = mod_dir / "manifest.json"
+    if not manifest_path.exists():
+        return
+    case_index = {c.get("case_id"): c for c in cases}
+    for entry in json.loads(manifest_path.read_text()):
+        file_path = mod_dir / entry["file_name"]
+        if not file_path.exists():
+            continue
+        case_ids = {c["case_id"] for c in (entry.get("cases") or []) if c.get("case_id")}
+        if len(case_ids) != 1:
+            continue
+        case = case_index.get(next(iter(case_ids)))
+        if case is None:
+            continue
+        yield entry, file_path, case
+
+
+def _sample_for_aliquot(case: dict[str, Any], aliquot_id: str | None) -> dict[str, Any]:
+    """The sample dict owning `aliquot_id`, or {} when it can't be resolved."""
+    if not aliquot_id:
+        return {}
+    sample_id = _aliquot_to_sample(case).get(aliquot_id)
+    if not sample_id:
+        return {}
+    return next(
+        (s for s in (case.get("samples") or []) if s.get("sample_id") == sample_id),
+        {},
+    )
+
+
+def _aliquot_fks(case: dict[str, Any], aliquot_id: str | None) -> dict[str, Any]:
+    """Case + sample + aliquot FK columns for one aliquot-scoped measurement."""
+    sample = _sample_for_aliquot(case, aliquot_id)
+    return {
+        "case_id": case.get("case_id"),
+        "case_submitter_id": case.get("submitter_id"),
+        "sample_id": sample.get("sample_id"),
+        "sample_submitter_id": sample.get("submitter_id"),
+        "sample_type": sample.get("sample_type"),
+        "aliquot_id": aliquot_id,
+        "aliquot_submitter_id": _aliquot_to_submitter(case).get(aliquot_id or ""),
+    }
+
+
+def _aliquot_entities(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        e
+        for e in (entry.get("associated_entities") or [])
+        if e.get("entity_type") == "aliquot" and e.get("entity_id")
+    ]
+
+
+def _submitter_for_entity(entry: dict[str, Any], entity_id: str | None) -> str | None:
+    for e in _aliquot_entities(entry):
+        if e["entity_id"] == entity_id:
+            return e.get("entity_submitter_id")
+    return None
+
+
+def _seg_aliquot(df: pd.DataFrame) -> str | None:
+    """The single aliquot a seg file's own `GDC_Aliquot` column reports."""
+    values = {v for v in df["GDC_Aliquot"].dropna().unique()}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _allele_specific_copy_number_segment_rows(
+    cases: list[dict[str, Any]],
+    project_raw_dir: Path,
+) -> list[dict[str, Any]]:
+    """One row per allele-specific copy number segment.
+
+    ASCAT is a paired caller, so each file names two aliquots. The tumour is
+    identified positively as the aliquot the file's own `GDC_Aliquot` column
+    reports; whichever other aliquot the file is associated with is the
+    matched normal. Files whose `GDC_Aliquot` isn't a single consistent value
+    are skipped rather than guessed at.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry, file_path, case in _iter_modality_files(
+        project_raw_dir, "copy_number_allele_specific", cases
+    ):
+        df = pd.read_csv(file_path, sep="\t", low_memory=False)
+        if df.empty:
+            continue
+        tumor_aliquot = _seg_aliquot(df)
+        if tumor_aliquot is None:
+            continue
+        others = [
+            e["entity_id"] for e in _aliquot_entities(entry) if e["entity_id"] != tumor_aliquot
+        ]
+        normal_aliquot = others[0] if len(others) == 1 else None
+        common = {
+            **_aliquot_fks(case, tumor_aliquot),
+            "matched_normal_aliquot_id": normal_aliquot,
+            "matched_normal_aliquot_submitter_id": _submitter_for_entity(entry, normal_aliquot),
+            "workflow_type": entry.get("workflow_type"),
+            "experimental_strategy": entry.get("experimental_strategy"),
+            "source_file_id": entry["file_id"],
+        }
+        for r in df.itertuples(index=False):
+            rows.append(
+                {
+                    **common,
+                    "chromosome": _na_to_none(r.Chromosome),
+                    "start": _to_int_or_none(r.Start),
+                    "end": _to_int_or_none(r.End),
+                    "copy_number": _to_int_or_none(r.Copy_Number),
+                    "major_copy_number": _to_int_or_none(r.Major_Copy_Number),
+                    "minor_copy_number": _to_int_or_none(r.Minor_Copy_Number),
+                }
+            )
+    return rows
+
+
+def _masked_copy_number_segment_rows(
+    cases: list[dict[str, Any]],
+    project_raw_dir: Path,
+) -> list[dict[str, Any]]:
+    """One row per masked (germline-CNV-removed) DNAcopy segment.
+
+    Single-aliquot files, so the FK comes straight from `GDC_Aliquot`.
+    Note this data type writes bare chromosome names ("1") where the
+    allele-specific type writes "chr1"; both are carried as written.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry, file_path, case in _iter_modality_files(
+        project_raw_dir, "copy_number_masked", cases
+    ):
+        df = pd.read_csv(file_path, sep="\t", low_memory=False)
+        if df.empty:
+            continue
+        aliquot_id = _seg_aliquot(df)
+        if aliquot_id is None:
+            continue
+        common = {
+            **_aliquot_fks(case, aliquot_id),
+            "workflow_type": entry.get("workflow_type"),
+            "source_file_id": entry["file_id"],
+        }
+        for r in df.itertuples(index=False):
+            rows.append(
+                {
+                    **common,
+                    "chromosome": _na_to_none(str(r.Chromosome)),
+                    "start": _to_int_or_none(r.Start),
+                    "end": _to_int_or_none(r.End),
+                    "num_probes": _to_int_or_none(r.Num_Probes),
+                    "segment_mean": _to_float_or_none(r.Segment_Mean),
+                }
+            )
+    return rows
+
+
+def _mirna_expression_quantification_rows(
+    cases: list[dict[str, Any]],
+    project_raw_dir: Path,
+) -> list[dict[str, Any]]:
+    """One row per (aliquot, miRBase v21 mature miRNA).
+
+    miRNA files carry no aliquot column of their own, so the FK is the file's
+    single associated aliquot entity.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry, file_path, case in _iter_modality_files(project_raw_dir, "mirna", cases):
+        entities = _aliquot_entities(entry)
+        if len(entities) != 1:
+            continue
+        aliquot_id = entities[0]["entity_id"]
+        df = pd.read_csv(file_path, sep="\t", low_memory=False)
+        # Source header is `cross-mapped`. The hyphen makes it unusable as a
+        # bare SQL identifier — and unreachable as an attribute on an
+        # `itertuples` row — so rename it here. Values are untouched.
+        df = df.rename(columns={"cross-mapped": "cross_mapped"})
+        common = {**_aliquot_fks(case, aliquot_id), "source_file_id": entry["file_id"]}
+        for r in df.itertuples(index=False):
+            rows.append(
+                {
+                    **common,
+                    "mirna_id": _na_to_none(r.miRNA_ID),
+                    "read_count": _to_int_or_none(r.read_count),
+                    "reads_per_million_mirna_mapped": _to_float_or_none(
+                        r.reads_per_million_miRNA_mapped
+                    ),
+                    "cross_mapped": _na_to_none(r.cross_mapped),
+                }
+            )
+    return rows
+
+
+def _portion_to_sample(case: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map portion_id -> {portion_submitter_id, sample dict} for one case."""
+    out: dict[str, dict[str, Any]] = {}
+    for s in case.get("samples") or []:
+        for p in s.get("portions") or []:
+            pid = p.get("portion_id")
+            if pid:
+                out[pid] = {"portion_submitter_id": p.get("submitter_id"), "sample": s}
+    return out
+
+
+def _protein_expression_quantification_rows(
+    cases: list[dict[str, Any]],
+    project_raw_dir: Path,
+) -> list[dict[str, Any]]:
+    """One row per (portion, antibody) RPPA measurement.
+
+    RPPA is the one modality that attaches to a portion rather than an
+    aliquot, so the sample FK is resolved through the portion.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry, file_path, case in _iter_modality_files(
+        project_raw_dir, "protein_expression", cases
+    ):
+        portions = [
+            e
+            for e in (entry.get("associated_entities") or [])
+            if e.get("entity_type") == "portion" and e.get("entity_id")
+        ]
+        if len(portions) != 1:
+            continue
+        portion_id = portions[0]["entity_id"]
+        resolved = _portion_to_sample(case).get(portion_id, {})
+        sample = resolved.get("sample") or {}
+        df = pd.read_csv(file_path, sep="\t", low_memory=False)
+        common = {
+            "case_id": case.get("case_id"),
+            "case_submitter_id": case.get("submitter_id"),
+            "sample_id": sample.get("sample_id"),
+            "sample_submitter_id": sample.get("submitter_id"),
+            "sample_type": sample.get("sample_type"),
+            "portion_id": portion_id,
+            "portion_submitter_id": (
+                resolved.get("portion_submitter_id") or portions[0].get("entity_submitter_id")
+            ),
+            "source_file_id": entry["file_id"],
+        }
+        for r in df.itertuples(index=False):
+            rows.append(
+                {
+                    **common,
+                    "agid": _na_to_none(r.AGID),
+                    # Numeric in the source but an identifier, not a
+                    # measurement; kept as a string so it never picks up a
+                    # decimal point on a null-containing column.
+                    "lab_id": None if pd.isna(r.lab_id) else str(r.lab_id),
+                    "catalog_number": _na_to_none(r.catalog_number),
+                    "set_id": _na_to_none(r.set_id),
+                    "peptide_target": _na_to_none(r.peptide_target),
+                    "protein_expression": _to_float_or_none(r.protein_expression),
+                }
+            )
     return rows
 
 
@@ -505,6 +782,18 @@ def build_tables(
         "files": lambda: _files_rows(project_raw_dir),
         "survival_derived": list,
         "pathology_report": lambda: _pathology_report_rows(cases, project_raw_dir),
+        "allele_specific_copy_number_segment": lambda: (
+            _allele_specific_copy_number_segment_rows(cases, project_raw_dir)
+        ),
+        "masked_copy_number_segment": lambda: (
+            _masked_copy_number_segment_rows(cases, project_raw_dir)
+        ),
+        "mirna_expression_quantification": lambda: (
+            _mirna_expression_quantification_rows(cases, project_raw_dir)
+        ),
+        "protein_expression_quantification": lambda: (
+            _protein_expression_quantification_rows(cases, project_raw_dir)
+        ),
     }
     # ssGSEA scores are per-project pure; the matching stats tables are a
     # cohort-level aggregate written by the caller after every project's
@@ -540,6 +829,15 @@ def build_tables(
         )
         for suffix, rows in supp_rows.items():
             name = f"clinical_supplement_{suffix}"
+            if only is None or name in wanted:
+                tables[name] = rows
+
+    if only is None or any(t.startswith("biospecimen_supplement_") for t in wanted):
+        bio_rows = _biospecimen_supplement_mod.build_tabular_rows(
+            project_raw_dir / "biospecimen_supplement"
+        )
+        for suffix, rows in bio_rows.items():
+            name = f"biospecimen_supplement_{suffix}"
             if only is None or name in wanted:
                 tables[name] = rows
     return tables
