@@ -159,6 +159,11 @@ _PATIENT_VIEW_MAPPING = """\
 | Gene Expression Quantification | `samples_gene_expression_quantification` array on each patient row (`stranded_first` / `stranded_second` dropped — GDC harmonizes as unstranded) |
 | BCR Clinical Supplements | `clinical_supplement` struct on each patient row, with sub-fields `patient` (1 dict) and `follow_ups` / `ntes` / `drugs` / `radiations` / `ablations` / `omfs` (lists of dicts). Sub-fields with no data for the project are omitted. |
 | Pathology Reports | `samples_pathology_report` array on each patient row; `pdf_bytes` holds the scanned PDF verbatim, joined to its sample via `pathology_report_uuid` |
+| Allele-specific Copy Number Segment | `samples_allele_specific_copy_number_segment` array — one record per (aliquot, caller) with segments as index-aligned arrays; filter on `workflow_type` |
+| Masked Copy Number Segment | `samples_masked_copy_number_segment` array — one record per aliquot, log2 ratios in `segment_mean` |
+| miRNA Expression Quantification | `samples_mirna_expression_quantification` array — one record per aliquot, ~1,881 miRNAs as index-aligned arrays |
+| Protein Expression Quantification | `samples_protein_expression_quantification` array — one record per **portion** (not aliquot), ~487 antibodies |
+| BCR Biospecimen Supplements | `biospecimen_supplement` struct on each patient row, with list-valued sub-fields (`sample`, `portion`, `analyte`, `aliquot`, `slide`, `protocol`, `ssf_*`, ...). Sub-fields with no data for the project are omitted. |
 | MSigDB gene sets + RNA-Seq | `samples_ssgsea_<collection>` array columns — pathway activity per aliquot; see the ssGSEA section below |
 """
 
@@ -673,25 +678,41 @@ fallback.
 """
 
 
-def _copy_number_section() -> str:
-    """Section on the two copy-number segment tables.
+def _copy_number_section(*, consolidated: bool) -> str:
+    """Section on the two copy-number segment modalities.
 
     Needs its own section because of one trap: three callers ship for
     overlapping aliquots and a query that ignores `workflow_type` silently
     pools them.
     """
-    return """\
+    if consolidated:
+        where = (
+            "in two array columns on each patient row that answer different "
+            "questions. Each record covers one assay run, with the per-segment "
+            "values as index-aligned arrays inside it."
+        )
+        names = (
+            "| Column | Caller | Measurement | Files |\n"
+            "|---|---|---|---|\n"
+            "| `samples_allele_specific_copy_number_segment` | ASCAT2, ASCAT3, AscatNGS | **Integer** total copy number plus its split into `major_copy_number` / `minor_copy_number` | 23,225 |\n"  # noqa: E501
+            "| `samples_masked_copy_number_segment` | DNAcopy | **Relative** log2(sample / reference) in `segment_mean`, germline CNVs masked out | 22,629 |"  # noqa: E501
+        )
+    else:
+        where = "in two tables that answer different questions."
+        names = (
+            "| Table | Caller | Measurement | Files |\n"
+            "|---|---|---|---|\n"
+            "| `allele_specific_copy_number_segment` | ASCAT2, ASCAT3, AscatNGS | **Integer** total copy number plus its split into `major_copy_number` / `minor_copy_number` | 23,225 |\n"  # noqa: E501
+            "| `masked_copy_number_segment` | DNAcopy | **Relative** log2(sample / reference) in `segment_mean`, germline CNVs masked out | 22,629 |"  # noqa: E501
+        )
+    return f"""\
 ## Copy number
 
-Copy number ships at **segment level, exactly as GDC serves it**, in two
-tables that answer different questions.
+Copy number ships at **segment level, exactly as GDC serves it**, {where}
 
-| Table | Caller | Measurement | Files |
-|---|---|---|---|
-| `allele_specific_copy_number_segment` | ASCAT2, ASCAT3, AscatNGS | **Integer** total copy number plus its split into `major_copy_number` / `minor_copy_number` | 23,225 |
-| `masked_copy_number_segment` | DNAcopy | **Relative** log2(sample / reference) in `segment_mean`, germline CNVs masked out | 22,629 |
+{names}
 
-`copy_number = major_copy_number + minor_copy_number` holds on every row.
+`copy_number = major_copy_number + minor_copy_number` holds everywhere.
 `minor_copy_number = 0` with `major_copy_number > 0` is loss of
 heterozygosity.
 
@@ -710,7 +731,7 @@ the other two run on genotyping arrays, recorded in
 A query that does not filter on `workflow_type` is pooling three different
 answers to the same question. ASCAT3 is GDC's current standard.
 
-### The two tables are not interchangeable
+### The two views are not interchangeable
 
 Nesting each masked segment inside its containing ASCAT3 segment on
 TCGA-CHOL (2,590 pairs) gives Spearman **+0.56**, with median
@@ -728,8 +749,8 @@ near log2 0. **Use the allele-specific calls for absolute copy number, the
 masked segments for reference-relative ratio.**
 
 One formatting difference is carried through from the source rather than
-normalized: `allele_specific_copy_number_segment` writes `chr1`, and
-`masked_copy_number_segment` writes bare `1`.
+normalized: the allele-specific segments write `chr1`, and the masked
+segments write bare `1`.
 
 ### A small tail of over-fragmented masked segments
 
@@ -762,15 +783,35 @@ as a clearly-labelled derived table.
 """
 
 
-def _mirna_and_protein_section() -> str:
+def _mirna_and_protein_section(*, consolidated: bool) -> str:
     """Section on the two remaining per-specimen molecular assays."""
-    return """\
+    mirna_name = (
+        "`samples_mirna_expression_quantification`"
+        if consolidated
+        else "`mirna_expression_quantification`"
+    )
+    rppa_name = (
+        "`samples_protein_expression_quantification`"
+        if consolidated
+        else "`protein_expression_quantification`"
+    )
+    mirna_shape = (
+        "One record per aliquot, holding ~1,881 miRBase v21 mature miRNAs as "
+        "index-aligned arrays"
+        if consolidated
+        else "One row per (aliquot, miRBase v21 mature miRNA) — ~1,881 miRNAs per aliquot"
+    )
+    rppa_shape = (
+        "One record per portion, holding ~487 antibodies as index-aligned arrays"
+        if consolidated
+        else "One row per (portion, antibody)"
+    )
+    return f"""\
 ## miRNA-Seq and protein expression (RPPA)
 
-### `mirna_expression_quantification`
+### {mirna_name}
 
-One row per (aliquot, miRBase v21 mature miRNA) — ~1,881 miRNAs per
-aliquot, 11,441 files across TCGA. `read_count` is raw;
+{mirna_shape}, from 11,441 files across TCGA. `read_count` is raw;
 `reads_per_million_mirna_mapped` is normalized within the aliquot and sums
 to exactly 1,000,000 per aliquot.
 
@@ -783,17 +824,16 @@ only because the hyphen is not a legal bare SQL identifier.
 Isoform-level quantification (`Isoform Expression Quantification`, ~4 GB)
 is not shipped.
 
-### `protein_expression_quantification`
+### {rppa_name}
 
-Reverse Phase Protein Array, one row per (portion, antibody). 7,906 files
+Reverse Phase Protein Array. {rppa_shape}. 7,906 files
 covering **7,827 of 11,428 TCGA cases — the narrowest coverage of any
 modality here**, because RPPA was only run on a subset.
 
 Three things to know before using it:
 
 - It is the only modality that attaches to a **portion**, not an aliquot,
-  so it carries `portion_id` / `portion_submitter_id` and resolves
-  `sample_id` through the portion.
+  so it carries `portion_id` and resolves `sample_id` through the portion.
 - The antibody panel grew over the project's life, and `set_id` records
   which version a measurement came from. A `peptide_target` absent for a
   sample may mean "not on that panel" rather than "measured as zero".
@@ -808,45 +848,66 @@ targets on TCGA-CHOL.
 """
 
 
-def _biospecimen_section() -> str:
+def _biospecimen_section(*, consolidated: bool) -> str:
     """Section on the BCR biospecimen biotabs."""
-    return """\
+    if consolidated:
+        intro = (
+            "The counterpart to the `clinical_supplement` struct: where that "
+            "describes the patient, the `biospecimen_supplement` struct describes "
+            "the **specimen chain**"
+        )
+        shape = (
+            "one list-valued sub-field per form. Every sub-field is a list — "
+            "unlike `clinical_supplement`, which has a single-dict `patient` slot "
+            "— because each of these forms is one-row-per-entity."
+        )
+        table_col = "Sub-field"
+        prefix = ""
+    else:
+        intro = (
+            "The counterpart to `clinical_supplement_*`: where those describe the "
+            "patient, `biospecimen_supplement_*` describes the **specimen chain**"
+        )
+        shape = "one table per form."
+        table_col = "Table"
+        prefix = "biospecimen_supplement_"
+    return f"""\
 ## Biospecimen supplements
 
-The counterpart to `clinical_supplement_*`: where those describe the
-patient, `biospecimen_supplement_*` describes the **specimen chain** — how
+{intro} — how
 a tumour got from the operating room to a sequencer, and the pathologist's
 read on each slide along the way. 340 BCR biotab files across TCGA
-(~76 MB) covering 11,315 cases, one table per form.
+(~76 MB) covering 11,315 cases, {shape}
 
-Some of it restates what `cases` already nests (sample / portion / analyte
-/ aliquot ids and types). The tables worth reaching for are the ones with
-no `/cases` equivalent:
+Some of it restates what the case structure already nests (sample /
+portion / analyte / aliquot ids and types). The forms worth reaching for
+are the ones with no `/cases` equivalent:
 
-| Table | What is in it |
+| {table_col} | What is in it |
 |---|---|
-| `biospecimen_supplement_slide` | Per-slide `percent_tumor_nuclei`, `percent_necrosis`, `percent_stromal_cells`, `percent_lymphocyte_infiltration`, `section_location` — the QC layer behind "is this sample actually tumour?", and the standard covariate for purity and deconvolution work |
-| `biospecimen_supplement_analyte` | `a260_a280_ratio`, `concentration`, extraction method — nucleic-acid quality, which drives batch effects |
-| `biospecimen_supplement_protocol`, `..._shipment_portion` | Plate, shipment and centre each specimen moved through — the raw material for batch-effect analysis |
-| `biospecimen_supplement_ssf_tumor_samples`, `..._ssf_normal_controls` | Site-specific factors: the disease-specific pathology fields the pan-cancer clinical schema has no column for |
-| `biospecimen_supplement_cqcf` | The submitting centre's clinical quality control form (TCGA-LUAD only) |
+| `{prefix}slide` | Per-slide `percent_tumor_nuclei`, `percent_necrosis`, `percent_stromal_cells`, `percent_lymphocyte_infiltration`, `section_location` — the QC layer behind "is this sample actually tumour?", and the standard covariate for purity and deconvolution work |
+| `{prefix}analyte` | `a260_a280_ratio`, `concentration`, extraction method — nucleic-acid quality, which drives batch effects |
+| `{prefix}protocol`, `{prefix}shipment_portion` | Plate, shipment and centre each specimen moved through — the raw material for batch-effect analysis |
+| `{prefix}ssf_tumor_samples`, `{prefix}ssf_normal_controls` | Site-specific factors: the disease-specific pathology fields the pan-cancer clinical schema has no column for |
+| `{prefix}cqcf` | The submitting centre's clinical quality control form (TCGA-LUAD only) |
 
 Like the clinical supplements these are **flex-schema**: the column set
-differs by project and by submitting centre, so each (project, form) pair
-gets its own parquet with its own inferred columns rather than a padded
-pan-cancer union. All fields are typed as strings with BCR sentinels like
+differs by project and by submitting centre, so the shape is inferred per
+project rather than padded into a pan-cancer union. Forms with no data for
+a project are omitted entirely (only TCGA-LUAD has `cqcf`; only 9 projects
+have `auxiliary`). All fields are typed as strings with BCR sentinels like
 `[Not Available]` preserved verbatim.
 
-Every row carries `case_submitter_id`. The specimen-level forms are keyed
-on their own entity and several omit the patient barcode column entirely,
-in which case it is recovered as the first three groups of the entity
-barcode (`TCGA-3X-AAV9-01A-11D-A42S-01` → `TCGA-3X-AAV9`) — a property of
-the TCGA barcode grammar, not a heuristic.
+Records are keyed to the patient by BCR barcode. The specimen-level forms
+are keyed on their own entity and several omit the patient barcode column
+entirely, in which case it is recovered as the first three groups of the
+entity barcode (`TCGA-3X-AAV9-01A-11D-A42S-01` → `TCGA-3X-AAV9`) — a
+property of the TCGA barcode grammar, not a heuristic.
 
 Two submitters ship these files: `nationwidechildrens.org` for 334 of the
 340, and `genome.wustl.edu` for 6 (all TCGA-LUAD). Where both ship the
-same form for one project their rows are concatenated into one table, and
-the parquet schema is the union of their columns.
+same form for one project their records are concatenated, and the parquet
+schema is the union of their columns.
 """
 
 
@@ -885,6 +946,9 @@ tags:
             _data_model(consolidated=True),
             _shared_survival_endpoints(consolidated=True),
             _pathology_section(consolidated=True),
+            _copy_number_section(consolidated=True),
+            _mirna_and_protein_section(consolidated=True),
+            _biospecimen_section(consolidated=True),
             _ssgsea_section(consolidated=True),
             _PATIENT_LOADING,
             _GDC_REFERENCES,
@@ -936,12 +1000,9 @@ tags:
             _data_model(consolidated=False),
             _shared_survival_endpoints(consolidated=False),
             _pathology_section(consolidated=False),
-            # Copy number, miRNA, RPPA and the biospecimen biotabs are
-            # tabular-only for now — the consolidated patient layout has no
-            # columns for them yet, so its card must not advertise them.
-            _copy_number_section(),
-            _mirna_and_protein_section(),
-            _biospecimen_section(),
+            _copy_number_section(consolidated=False),
+            _mirna_and_protein_section(consolidated=False),
+            _biospecimen_section(consolidated=False),
             _ssgsea_section(consolidated=False),
             _TABULAR_LOADING,
             _GDC_REFERENCES,

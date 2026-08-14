@@ -242,6 +242,52 @@ def _build_clinical_supplement_column(rows: list[dict[str, Any]]) -> pa.Array | 
     return pa.array(cleaned)
 
 
+def _build_biospecimen_supplement_column(rows: list[dict[str, Any]]) -> pa.Array | None:
+    """Build a per-project pyarrow column for the flex biospecimen_supplement struct.
+
+    Same flex-schema reasoning as `_build_clinical_supplement_column`: BCR
+    biotab columns vary by cancer type and by submitting centre, so the
+    struct type is inferred per project rather than enumerated in the global
+    PATIENTS schema.
+
+    Simpler than its clinical counterpart in one way — every biospecimen form
+    is list-valued (a patient has N samples, N aliquots, N slides), so there
+    is no single-dict `patient` slot to special-case. Form keys empty for
+    every patient in the project are dropped, since pyarrow cannot infer a
+    struct type from all-empty lists (only TCGA-LUAD has `cqcf`, and only 9
+    projects have `auxiliary`).
+
+    Returns None if no patient in the project has any biospecimen data.
+    """
+    from tcga2hf_pipeline.biospecimen_supplement import TABULAR_FORM_KINDS
+
+    payloads: list[dict[str, Any] | None] = []
+    keys_with_data: set[str] = set()
+    for row in rows:
+        supp = row.get("biospecimen_supplement")
+        if not supp:
+            payloads.append(None)
+            continue
+        keep: dict[str, Any] = {}
+        for k in TABULAR_FORM_KINDS:
+            v = supp.get(k)
+            if v:
+                keys_with_data.add(k)
+            keep[k] = v or []
+        payloads.append(keep)
+
+    if not keys_with_data:
+        return None
+
+    cleaned: list[dict[str, Any] | None] = []
+    for p in payloads:
+        if p is None:
+            cleaned.append(None)
+            continue
+        cleaned.append({k: v for k, v in p.items() if k in keys_with_data})
+    return pa.array(cleaned)
+
+
 def write_patients(rows: list[dict[str, Any]], processed_dir: Path, project_id: str) -> Path:
     """Write a single project's patient rows to <project_id>/data.parquet.
 
@@ -262,9 +308,12 @@ def write_patients(rows: list[dict[str, Any]], processed_dir: Path, project_id: 
     # (pyarrow's from_pylist silently drops extra dict keys, but being
     # explicit is clearer); attach it as a separate flex-typed column after.
     supp_col = _build_clinical_supplement_column(rows)
+    bio_col = _build_biospecimen_supplement_column(rows)
     table = pa.Table.from_pylist(rows, schema=PATIENTS)
     if supp_col is not None:
         table = table.append_column("clinical_supplement", supp_col)
+    if bio_col is not None:
+        table = table.append_column("biospecimen_supplement", bio_col)
     pq.write_table(
         table,
         out_path,
