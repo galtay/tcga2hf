@@ -55,6 +55,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from tcga2hf.schema import (
     ALIQUOT_FIELDS,
+    ALLELE_SPECIFIC_CNV_FIELDS,
     ANALYTE_FIELDS,
     DEMOGRAPHIC_FIELDS,
     DIAGNOSIS_FIELDS,
@@ -62,10 +63,13 @@ from tcga2hf.schema import (
     EXPRESSION_FIELDS,
     FAMILY_HISTORY_FIELDS,
     FOLLOW_UP_FIELDS,
+    MASKED_CNV_FIELDS,
+    MIRNA_FIELDS,
     MUTATION_FIELDS,
     PATHOLOGY_REPORT_FIELDS,
     PATIENT_FIELDS,
     PORTION_FIELDS,
+    PROTEIN_EXPRESSION_FIELDS,
     SAMPLE_FIELDS,
     SSGSEA_COLLECTIONS,
     SSGSEA_FIELDS,
@@ -329,6 +333,194 @@ class PathologyReport(_PathologyReportBase):
         return out
 
 
+_AlleleSpecificCopyNumberBase = _make_entity(
+    "_AlleleSpecificCopyNumberBase",
+    ALLELE_SPECIFIC_CNV_FIELDS,
+    required=("aliquot_id", "source_file_id"),
+)
+
+
+class AlleleSpecificCopyNumber(_AlleleSpecificCopyNumberBase):
+    """Integer allele-specific copy number segments for one aliquot and caller.
+
+    One record per (tumour aliquot, `workflow_type`). ASCAT2, ASCAT3 and
+    AscatNGS all ship for overlapping aliquots and fit purity and ploidy
+    independently, so a patient can carry several records for the same
+    aliquot that disagree. **Filter on `workflow_type`** — ASCAT3 is GDC's
+    current standard.
+
+    `copy_number` is total integer copy number; `major_copy_number` and
+    `minor_copy_number` split it by allele and always sum to it. All arrays
+    are index-aligned with `chromosome` / `start` / `end`.
+    """
+
+    def segments_at(self, chromosome: str, position: int) -> list[dict[str, Any]]:
+        """Every segment covering `position` on `chromosome`.
+
+        `chromosome` is matched as written in this data type — `chr`-prefixed
+        (e.g. "chr7"). A bare "7" is accepted and normalized, since the
+        sibling masked-segment records spell it that way.
+        """
+        want = chromosome if chromosome.startswith("chr") else f"chr{chromosome}"
+        out: list[dict[str, Any]] = []
+        for i, chrom in enumerate(self.chromosome or []):
+            if chrom == want and self.start[i] <= position <= self.end[i]:
+                out.append(
+                    {
+                        "chromosome": chrom,
+                        "start": self.start[i],
+                        "end": self.end[i],
+                        "copy_number": self.copy_number[i],
+                        "major_copy_number": self.major_copy_number[i],
+                        "minor_copy_number": self.minor_copy_number[i],
+                    }
+                )
+        return out
+
+    def loh_segments(self) -> list[dict[str, Any]]:
+        """Segments showing loss of heterozygosity (minor == 0 < major)."""
+        return [
+            {
+                "chromosome": self.chromosome[i],
+                "start": self.start[i],
+                "end": self.end[i],
+                "copy_number": self.copy_number[i],
+                "major_copy_number": self.major_copy_number[i],
+                "minor_copy_number": self.minor_copy_number[i],
+            }
+            for i in range(len(self.chromosome or []))
+            if self.minor_copy_number[i] == 0 and (self.major_copy_number[i] or 0) > 0
+        ]
+
+
+_MaskedCopyNumberBase = _make_entity(
+    "_MaskedCopyNumberBase",
+    MASKED_CNV_FIELDS,
+    required=("aliquot_id", "source_file_id"),
+)
+
+
+class MaskedCopyNumber(_MaskedCopyNumberBase):
+    """DNAcopy log2-ratio copy number segments for one aliquot, germline masked.
+
+    `segment_mean` is log2(sample / diploid reference), so 0 is copy-neutral.
+    This is a *relative* measurement and is not interchangeable with
+    `AlleleSpecificCopyNumber`: ASCAT corrects for tumour purity and ploidy
+    while DNAcopy does not, so integer copy number 3 in a hyperdiploid tumour
+    still reads near log2 0 here.
+
+    A small tail of files across TCGA (0.14%) is over-fragmented by array
+    noise, carrying tens of thousands of segments where the median record
+    carries under a hundred. `num_probes` is the filter — spurious segments
+    rest on very few probes.
+    """
+
+    def segments_at(self, chromosome: str, position: int) -> list[dict[str, Any]]:
+        """Every segment covering `position` on `chromosome`.
+
+        `chromosome` is matched as written in this data type — bare (e.g.
+        "7"). A `chr`-prefixed value is accepted and normalized, since the
+        sibling allele-specific records spell it that way.
+        """
+        want = chromosome.removeprefix("chr")
+        return [
+            {
+                "chromosome": self.chromosome[i],
+                "start": self.start[i],
+                "end": self.end[i],
+                "num_probes": self.num_probes[i],
+                "segment_mean": self.segment_mean[i],
+            }
+            for i in range(len(self.chromosome or []))
+            if self.chromosome[i] == want and self.start[i] <= position <= self.end[i]
+        ]
+
+
+_MirnaExpressionBase = _make_entity(
+    "_MirnaExpressionBase",
+    MIRNA_FIELDS,
+    required=("aliquot_id", "source_file_id"),
+)
+
+
+class MirnaExpression(_MirnaExpressionBase):
+    """Per-aliquot miRNA-Seq quantification (~1,881 miRBase v21 mature miRNAs).
+
+    `reads_per_million_mirna_mapped` is normalized within the aliquot and
+    sums to 1,000,000. `cross_mapped` is "Y" where reads for that miRNA also
+    aligned elsewhere, so the count is not uniquely attributable.
+    """
+
+    def get_mirna(self, mirna_id: str) -> dict[str, Any] | None:
+        """Return this aliquot's entry for `mirna_id`, or None if absent."""
+        try:
+            i = self.mirna_id.index(mirna_id)
+        except (ValueError, AttributeError):
+            return None
+        return {
+            "mirna_id": self.mirna_id[i],
+            "read_count": self.read_count[i],
+            "reads_per_million_mirna_mapped": self.reads_per_million_mirna_mapped[i],
+            "cross_mapped": self.cross_mapped[i],
+        }
+
+    def as_dict(self, *, exclude_cross_mapped: bool = False) -> dict[str, float]:
+        """{mirna_id: reads_per_million_mirna_mapped} for this aliquot."""
+        return {
+            m: rpm
+            for m, rpm, x in zip(
+                self.mirna_id or [],
+                self.reads_per_million_mirna_mapped or [],
+                self.cross_mapped or [],
+                strict=True,
+            )
+            if not (exclude_cross_mapped and x == "Y")
+        }
+
+
+_ProteinExpressionBase = _make_entity(
+    "_ProteinExpressionBase",
+    PROTEIN_EXPRESSION_FIELDS,
+    required=("portion_id", "source_file_id"),
+)
+
+
+class ProteinExpression(_ProteinExpressionBase):
+    """Per-portion RPPA protein expression (~487 antibodies).
+
+    The only modality here keyed on a portion rather than an aliquot.
+    Values are replicate-based normalized log2 signal centred near 0, so the
+    sign is meaningful.
+
+    Two caveats: the antibody panel grew over TCGA's life, so a target
+    missing from `peptide_target` may mean "not on this panel version"
+    (`set_id`) rather than "measured as zero"; and a null in
+    `protein_expression` is the source's literal `NA` — a failed
+    measurement, not a zero.
+    """
+
+    def get_target(self, peptide_target: str) -> dict[str, Any] | None:
+        """Return this portion's measurement for `peptide_target`, or None."""
+        try:
+            i = self.peptide_target.index(peptide_target)
+        except (ValueError, AttributeError):
+            return None
+        return {
+            "agid": self.agid[i],
+            "lab_id": self.lab_id[i],
+            "catalog_number": self.catalog_number[i],
+            "set_id": self.set_id[i],
+            "peptide_target": self.peptide_target[i],
+            "protein_expression": self.protein_expression[i],
+        }
+
+    def as_dict(self) -> dict[str, float | None]:
+        """{peptide_target: protein_expression} for this portion."""
+        return dict(
+            zip(self.peptide_target or [], self.protein_expression or [], strict=True)
+        )
+
+
 _SsgseaScoresBase = _make_entity(
     "_SsgseaScoresBase",
     SSGSEA_FIELDS,
@@ -441,6 +633,22 @@ _TcgaHfPatientBase = _make_entity(
             Field(default_factory=list),
         ),
         "samples_pathology_report": (list[PathologyReport], Field(default_factory=list)),
+        "samples_allele_specific_copy_number_segment": (
+            list[AlleleSpecificCopyNumber],
+            Field(default_factory=list),
+        ),
+        "samples_masked_copy_number_segment": (
+            list[MaskedCopyNumber],
+            Field(default_factory=list),
+        ),
+        "samples_mirna_expression_quantification": (
+            list[MirnaExpression],
+            Field(default_factory=list),
+        ),
+        "samples_protein_expression_quantification": (
+            list[ProteinExpression],
+            Field(default_factory=list),
+        ),
         **{
             ssgsea_patient_column(c): (list[SsgseaScores], Field(default_factory=list))
             for c in SSGSEA_COLLECTIONS

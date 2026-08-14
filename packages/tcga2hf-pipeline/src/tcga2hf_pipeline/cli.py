@@ -15,13 +15,16 @@ from tcga2hf_pipeline import (
     cdr,
     clinical,
     clinical_supplement,
+    copy_number,
     dataset_card,
     expression,
     genomic,
     hf_upload,
+    mirna,
     msigdb,
     mutations,
     pathology,
+    protein_expression,
     ssgsea,
     survival,
     tabular,
@@ -584,12 +587,26 @@ def build_cmd(
         mut_by_case = mutations.load_for_project(path.parent)
         expr_by_case = expression.load_for_project(path.parent)
         path_by_case = pathology.load_for_project(path.parent)
+        ascn_by_case = copy_number.load_allele_specific_for_project(path.parent)
+        mcn_by_case = copy_number.load_masked_for_project(path.parent)
+        mirna_by_case = mirna.load_for_project(path.parent)
+        rppa_by_case = protein_expression.load_for_project(path.parent)
         if mut_by_case:
             mutations.attach(rows, mut_by_case)
         if expr_by_case:
             expression.attach(rows, expr_by_case)
         if path_by_case:
             pathology.attach(rows, path_by_case)
+        if ascn_by_case:
+            copy_number.attach(
+                rows, ascn_by_case, "samples_allele_specific_copy_number_segment"
+            )
+        if mcn_by_case:
+            copy_number.attach(rows, mcn_by_case, "samples_masked_copy_number_segment")
+        if mirna_by_case:
+            mirna.attach(rows, mirna_by_case)
+        if rppa_by_case:
+            protein_expression.attach(rows, rppa_by_case)
         # ssGSEA pathway activity, one column per MSigDB collection. The TPM
         # matrix is memoized across collections: reading every STAR TSV
         # dominates the cost and the matrix is identical for all of them.
@@ -628,6 +645,15 @@ def build_cmd(
         supps = clinical_supplement.load_supplements_for_project(supp_dir)
         if supps:
             clinical_supplement.attach_supplements(rows, supps)
+        # BCR biotab Biospecimen Supplements — the specimen chain (slide
+        # tumour-nuclei percentages, analyte quality, plate/shipment
+        # provenance, site-specific factors). Flex-schema like the clinical
+        # supplements; serialized as its own per-project inferred struct.
+        bio_supps = biospecimen_supplement.load_supplements_for_project(
+            path.parent / "biospecimen_supplement"
+        )
+        if bio_supps:
+            biospecimen_supplement.attach_supplements(rows, bio_supps)
         # Re-derive OS / DSS / PFI / DFI from current GDC data using Liu
         # et al. 2018's algorithm; results land in `survival_derived` struct.
         # See `dev_research/liu_2018/report.html` for validation against
@@ -637,13 +663,19 @@ def build_cmd(
         n_variants = sum(len(r["samples_masked_somatic_mutation"]) for r in rows)
         n_expr = sum(len(r["samples_gene_expression_quantification"]) for r in rows)
         n_path = sum(len(r["samples_pathology_report"]) for r in rows)
+        n_ascn = sum(len(r["samples_allele_specific_copy_number_segment"]) for r in rows)
+        n_mcn = sum(len(r["samples_masked_copy_number_segment"]) for r in rows)
+        n_mirna = sum(len(r["samples_mirna_expression_quantification"]) for r in rows)
+        n_rppa = sum(len(r["samples_protein_expression_quantification"]) for r in rows)
+        n_bio = sum(1 for r in rows if r.get("biospecimen_supplement"))
         n_os = sum(1 for r in rows if (r.get("survival_derived") or {}).get("os_event") is not None)
         typer.echo(
             f"  {proj:<12} {len(rows):>4} patients  "
             f"mutations={n_variants:>5} ({len(mut_by_case)} MAFs)  "
             f"expression={n_expr:>4} aliquots ({len(expr_by_case)} TSVs)  "
             f"path_reports={n_path:>4}  ssgsea={n_ssgsea:>4}  "
-            f"os={n_os}/{len(rows)}"
+            f"cnv={n_ascn:>4}/{n_mcn:<4} mirna={n_mirna:>4} rppa={n_rppa:>4} "
+            f"biospec={n_bio:>4}  os={n_os}/{len(rows)}"
         )
 
         out = clinical.write_patients(rows, processed_dir, proj)

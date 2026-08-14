@@ -717,6 +717,91 @@ PATHOLOGY_REPORT_FIELDS: list[pa.Field] = [
 # numbers unpivoted; see that schema for why only the raw score is stored.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Copy number / miRNA / protein, consolidated-row shape
+#
+# Struct-of-arrays, matching EXPRESSION_FIELDS: one record per source file,
+# with the per-measurement columns as index-aligned arrays inside it. That
+# keeps a patient row at one struct per assay run rather than thousands of
+# tiny structs, and lets a consumer column-project a single measurement
+# vector without materializing the rest.
+#
+# These carry fewer FK columns than their tabular counterparts on purpose.
+# The consolidated row already holds the full `samples` tree, so submitter
+# ids and sample types are one lookup away; the tabular tables have no such
+# neighbour and must denormalize.
+# ---------------------------------------------------------------------------
+
+# ASCAT is a paired caller and all three of its workflows ship for
+# overlapping aliquots, so a case can carry several records for the same
+# tumour aliquot. `workflow_type` is scalar here — one record per (aliquot,
+# workflow) — which makes "give me the ASCAT3 calls" a filter on the struct
+# rather than a filter inside the arrays.
+ALLELE_SPECIFIC_CNV_FIELDS: list[pa.Field] = [
+    pa.field("sample_id", pa.string()),
+    pa.field("aliquot_id", pa.string()),
+    pa.field("matched_normal_aliquot_id", pa.string()),
+    # "ASCAT2" | "ASCAT3" | "AscatNGS".
+    pa.field("workflow_type", pa.string()),
+    # "Genotyping Array" for ASCAT2 / ASCAT3, "WGS" for AscatNGS.
+    pa.field("experimental_strategy", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    # `chr`-prefixed ("chr1"), unlike the masked segments below.
+    pa.field("chromosome", pa.list_(pa.string())),
+    pa.field("start", pa.list_(pa.int64())),
+    pa.field("end", pa.list_(pa.int64())),
+    pa.field("copy_number", pa.list_(pa.int32())),
+    pa.field("major_copy_number", pa.list_(pa.int32())),
+    pa.field("minor_copy_number", pa.list_(pa.int32())),
+]
+
+# DNAcopy log2 ratios against a diploid reference, germline CNVs masked.
+# Relative, not absolute — see the dataset card for why this and the
+# allele-specific calls are not interchangeable.
+MASKED_CNV_FIELDS: list[pa.Field] = [
+    pa.field("sample_id", pa.string()),
+    pa.field("aliquot_id", pa.string()),
+    pa.field("workflow_type", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    # Bare chromosome names ("1"), unlike the allele-specific segments.
+    pa.field("chromosome", pa.list_(pa.string())),
+    pa.field("start", pa.list_(pa.int64())),
+    pa.field("end", pa.list_(pa.int64())),
+    pa.field("num_probes", pa.list_(pa.int32())),
+    pa.field("segment_mean", pa.list_(pa.float64())),
+]
+
+MIRNA_FIELDS: list[pa.Field] = [
+    pa.field("sample_id", pa.string()),
+    pa.field("aliquot_id", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    pa.field("mirna_id", pa.list_(pa.string())),
+    pa.field("read_count", pa.list_(pa.int64())),
+    pa.field("reads_per_million_mirna_mapped", pa.list_(pa.float64())),
+    # "Y" where reads also aligned elsewhere, so the count is not uniquely
+    # attributable. Source header is `cross-mapped`.
+    pa.field("cross_mapped", pa.list_(pa.string())),
+]
+
+# RPPA attaches to a portion rather than an aliquot — the only modality in
+# this dataset that does — so it carries `portion_id` where its siblings
+# carry `aliquot_id`.
+PROTEIN_EXPRESSION_FIELDS: list[pa.Field] = [
+    pa.field("sample_id", pa.string()),
+    pa.field("portion_id", pa.string()),
+    pa.field("source_file_id", pa.string()),
+    pa.field("agid", pa.list_(pa.string())),
+    pa.field("lab_id", pa.list_(pa.string())),
+    pa.field("catalog_number", pa.list_(pa.string())),
+    # Antibody panel version; the panel grew over the project's life.
+    pa.field("set_id", pa.list_(pa.string())),
+    pa.field("peptide_target", pa.list_(pa.string())),
+    # Null entries are the source's literal `NA` — a failed measurement,
+    # not a zero.
+    pa.field("protein_expression", pa.list_(pa.float64())),
+]
+
+
 SSGSEA_FIELDS: list[pa.Field] = [
     pa.field("sample_id", pa.string()),
     pa.field("aliquot_id", pa.string()),
@@ -781,6 +866,22 @@ PATIENT_FIELDS: list[pa.Field] = [
         pa.list_(pa.struct(EXPRESSION_FIELDS)),
     ),
     pa.field("samples_pathology_report", pa.list_(pa.struct(PATHOLOGY_REPORT_FIELDS))),
+    pa.field(
+        "samples_allele_specific_copy_number_segment",
+        pa.list_(pa.struct(ALLELE_SPECIFIC_CNV_FIELDS)),
+    ),
+    pa.field(
+        "samples_masked_copy_number_segment",
+        pa.list_(pa.struct(MASKED_CNV_FIELDS)),
+    ),
+    pa.field(
+        "samples_mirna_expression_quantification",
+        pa.list_(pa.struct(MIRNA_FIELDS)),
+    ),
+    pa.field(
+        "samples_protein_expression_quantification",
+        pa.list_(pa.struct(PROTEIN_EXPRESSION_FIELDS)),
+    ),
     # One column per MSigDB collection, so a consumer can project just the
     # collection they need. Generated below from SSGSEA_COLLECTIONS, which
     # is defined after this list.
@@ -857,21 +958,30 @@ _ALIQUOT_FKS: list[pa.Field] = [
 
 
 # Cases: one row per patient with the GDC `cases.json` structure preserved.
-# Mirrors PATIENT_FIELDS minus the two molecular columns (those have their
-# own flat tables below). Each top-level JSON key in the GDC `/cases`
+# Mirrors PATIENT_FIELDS minus every molecular column (each of those has
+# its own flat table below). Each top-level JSON key in the GDC `/cases`
 # response maps to one column here — scalars stay scalar, struct fields
 # stay struct, list-of-struct fields stay list-of-struct. The table name
 # `cases` matches the source file name (`cases.json`).
+#
+# Derived by exclusion rather than by listing what to keep, so a new
+# clinical field added to PATIENT_FIELDS reaches the `cases` table
+# automatically. The cost is that a new *molecular* column must be named
+# here too, or it would leak into `cases` and duplicate its own table —
+# `test_cases_table_excludes_every_molecular_column` guards that.
+_MOLECULAR_PATIENT_COLUMNS: set[str] = {
+    "samples_masked_somatic_mutation",
+    "samples_gene_expression_quantification",
+    "samples_pathology_report",
+    "samples_allele_specific_copy_number_segment",
+    "samples_masked_copy_number_segment",
+    "samples_mirna_expression_quantification",
+    "samples_protein_expression_quantification",
+    *(ssgsea_patient_column(c) for c in SSGSEA_COLLECTIONS),
+}
+
 TABULAR_CASES_FIELDS: list[pa.Field] = [
-    f
-    for f in PATIENT_FIELDS
-    if f.name
-    not in {
-        "samples_masked_somatic_mutation",
-        "samples_gene_expression_quantification",
-        "samples_pathology_report",
-        *(ssgsea_patient_column(c) for c in SSGSEA_COLLECTIONS),
-    }
+    f for f in PATIENT_FIELDS if f.name not in _MOLECULAR_PATIENT_COLUMNS
 ]
 
 # Mutations: MUTATION_FIELDS already carries `case_id` (column 132 of the

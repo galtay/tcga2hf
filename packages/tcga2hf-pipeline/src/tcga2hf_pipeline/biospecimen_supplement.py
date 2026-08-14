@@ -232,6 +232,53 @@ def _suffix_for(kind: str) -> str:
     return kind.removeprefix("biospecimen_")
 
 
+def load_supplements_for_project(supp_dir: Path) -> dict[str, dict[str, list[dict]]]:
+    """Parse every biotab in supp_dir and group records by patient barcode.
+
+    Returns `{case_submitter_id: {form_suffix: [record, ...]}}`, with one key
+    per entry in `TABULAR_FORM_KINDS`.
+
+    Every slot is a list, unlike `clinical_supplement.load_supplements_for_project`
+    where `patient` is a single dict: these forms are all one-row-per-entity
+    (a patient has N samples, N portions, N aliquots, N slides), so there is
+    no once-per-patient form among them.
+    """
+    if not supp_dir.exists():
+        return {}
+
+    by_case: dict[str, dict[str, list[dict]]] = {}
+    for path in sorted(supp_dir.glob("*.txt")):
+        kind = _form_kind(path.name)
+        if kind is None:
+            continue
+        suffix = _suffix_for(kind)
+        if suffix not in TABULAR_FORM_KINDS:
+            continue
+        for rec in parse_biotab(path):
+            case_submitter_id = _case_submitter_id(rec)
+            if case_submitter_id is None:
+                continue
+            slot = by_case.setdefault(
+                case_submitter_id, {k: [] for k in TABULAR_FORM_KINDS}
+            )
+            slot[suffix].append(rec)
+    return by_case
+
+
+def attach_supplements(
+    rows: list[dict[str, Any]],
+    supplements_by_case: dict[str, dict[str, list[dict]]],
+) -> list[dict[str, Any]]:
+    """Attach raw biospecimen records to each patient row under `biospecimen_supplement`.
+
+    Keyed on `case_submitter_id` (the BCR patient barcode) rather than
+    `case_id`, since the biotabs carry barcodes and never UUIDs for the case.
+    """
+    for row in rows:
+        row["biospecimen_supplement"] = supplements_by_case.get(row.get("case_submitter_id"))
+    return rows
+
+
 def build_tabular_rows(supp_dir: Path) -> dict[str, list[dict[str, Any]]]:
     """Per-form list of biotab records for tabular emission.
 
