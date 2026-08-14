@@ -365,6 +365,24 @@ def test_all_four_modalities_satisfy_the_patients_schema(tmp_path: Path) -> None
     assert len(table["samples_protein_expression_quantification"][0]) == 1
 
 
+def test_every_molecular_column_is_initialized_by_to_patient_rows() -> None:
+    """A project with zero files for a modality must still get the column.
+
+    `attach` is only called when a modality has data, so `to_patient_rows`
+    is the sole thing putting an empty column on the row otherwise. Missing
+    an entry there means the build crashes on the first project lacking that
+    modality — TCGA-LAML has no RPPA and no pathology reports, and is 14th
+    alphabetically, so the failure lands 40 minutes into a full rebuild.
+    """
+    from tcga2hf_pipeline.clinical import to_patient_rows
+
+    rows = to_patient_rows([{"case_id": "c", "submitter_id": "TCGA-XX-0000"}])
+    molecular = {n for n in PATIENTS.names if n.startswith("samples_")}
+    missing = molecular - set(rows[0])
+    assert missing == set(), f"columns never initialized: {sorted(missing)}"
+    assert all(rows[0][n] == [] for n in molecular)
+
+
 def test_cases_table_excludes_every_molecular_column() -> None:
     """A new molecular column must not leak into the tabular `cases` table."""
     from tcga2hf.schema import TABULAR_CASES_FIELDS

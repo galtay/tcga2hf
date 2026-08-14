@@ -159,10 +159,18 @@ def _patient_row(case: dict[str, Any]) -> dict[str, Any]:
         "family_histories": _sort_by_id(family_histories, "family_history_id"),
         "samples": _sort_temporal(samples, "days_to_collection", "sample_id"),
         # Per-file modality columns default to []; build step fills them in
-        # if the corresponding raw data has been fetched.
+        # if the corresponding raw data has been fetched. Every one of these
+        # must be listed: a project can legitimately have zero files for a
+        # modality (TCGA-LAML has no RPPA and no pathology reports), in which
+        # case `attach` is never called and this default is the only thing
+        # that puts the column on the row.
         "samples_masked_somatic_mutation": [],
         "samples_gene_expression_quantification": [],
         "samples_pathology_report": [],
+        "samples_allele_specific_copy_number_segment": [],
+        "samples_masked_copy_number_segment": [],
+        "samples_mirna_expression_quantification": [],
+        "samples_protein_expression_quantification": [],
         **{f"samples_ssgsea_{_c}": [] for _c in SSGSEA_COLLECTIONS},
         # Re-derived survival endpoints (Liu et al. 2018 algorithm). Build
         # step fills the struct via `survival.attach_survival`. Initialized
